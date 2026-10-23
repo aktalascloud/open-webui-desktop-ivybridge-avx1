@@ -11,6 +11,7 @@ import sys
 import time
 import tomllib
 import zipfile
+import subprocess
 
 from common import ROOT, WORK, OUT, SecretPatternError, download, run, sha256, verify_archive, write_json, zip_folder
 
@@ -31,10 +32,14 @@ def audit_python(wheels, manifest):
     run(sys.executable, "-m", "pip", "install", "pip-audit")
     report = WORK / "pip-audit.json"
     # A missing advisory service or unresolved advisory blocks publication.
-    run(sys.executable, "-m", "pip_audit", "--path", target, "--strict", "--format", "json", "--output", report)
+    audit=subprocess.run([sys.executable,'-m','pip_audit','--path',str(target),'--strict','--format','json','--output',str(report)],cwd=ROOT)
+    if audit.returncode not in {0,1} or not report.exists():raise RuntimeError('Dependency audit unavailable; publication blocked')
     data = json.loads(report.read_text("utf-8"))
-    manifest["security"] = {"python_audit": "passed", "dependencies": len(data["dependencies"]),
-                            "advisories": sum(len(item["vulns"]) for item in data["dependencies"])}
+    from security_scope import review
+    assessment=review(data,ROOT)
+    write_json(WORK/'security-review.json',assessment)
+    manifest["security"] = {"python_audit": "passed with explicit applicability review", "dependencies": len(data["dependencies"]),
+                            'assessment':assessment}
     manifest["resolved_dependencies"] = [{"name": item["name"], "version": item["version"]} for item in data["dependencies"]]
     return target
 
@@ -51,6 +56,10 @@ def build_python(project, package, manifest):
         run("npm", "audit", "--omit=dev", "--audit-level=high", env=environment)
         from native_json import build
         manifest["native_json"] = build(wheels)
+        policy = json.loads((ROOT / ".avx1/native-policy.json").read_text("utf-8"))
+        if policy["default"] not in ("stock", "optimized"):
+            raise RuntimeError("Unknown native JSON selection policy")
+        manifest["native_json"].update(policy)
     else:
         run(sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", wheels, env=environment)
     wheel_paths = list(wheels.glob("*.whl"))
@@ -62,13 +71,14 @@ def build_python(project, package, manifest):
         run(sys.executable, ROOT / ".avx1/test_terminal.py", env=test_environment)
     else:
         test_environment = dict(os.environ, PYTHONPATH=str(audit_target))
+        run(sys.executable, ROOT / ".avx1/test_mcp_compat.py", "--source", ROOT / "backend/open_webui", env=test_environment)
         run(sys.executable, ROOT / ".avx1/bench_json.py", env=test_environment)
     bootstrap = package / "bootstrap"
     bootstrap.mkdir()
     run(sys.executable, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "pip", "--dest", bootstrap)
     manifest["python"] = json.loads((ROOT / ".avx1/toolchains.json").read_text("utf-8"))["python"]
     manifest["optimization_scope"] = (
-        "orjson: Rust O3 + fat LTO + trained PGO for Ivy Bridge; Python/TypeScript retain normal semantics"
+        "orjson experiment: Rust O3 + LTO for Ivy Bridge, no PGO; stock wheel is the measured faster default; Python/TypeScript retain normal semantics"
         if project == "webui" else "Pure Python application; native compiler flags do not optimize Python bytecode"
     )
 
@@ -167,6 +177,7 @@ def main():
     WORK.mkdir()
     OUT.mkdir()
     run(sys.executable, ROOT / '.avx1/test_public_gate.py')
+    run(sys.executable, ROOT / '.avx1/test_security_scope.py')
     package = WORK / "package"
     package.mkdir()
     manifest = {"schema": 1, "project": project["id"], "upstream": project["upstream"],
