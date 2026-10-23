@@ -1,5 +1,7 @@
 import { ipcRenderer, contextBridge } from 'electron'
 
+export type SpotlightAPI = typeof api
+
 const api = {
   submitQuery: (query: string, images?: string[]): void => {
     ipcRenderer.invoke('spotlight:submit', query, images)

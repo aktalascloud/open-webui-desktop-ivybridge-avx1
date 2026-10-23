@@ -4,7 +4,7 @@
   import i18n from '../../../i18n'
   import Switch from '../../common/Switch.svelte'
 
-  let lsInfo = $state<{ url?: string; status?: string; pid?: number; binaryPath?: string } | null>(null)
+  let lsInfo = $state<{ url?: string; status?: string; pid?: number; binaryPath?: string; version?: string } | null>(null)
   let stopping = $state(false)
   let starting = $state(false)
   let restarting = $state(false)
@@ -88,7 +88,7 @@
     starting = true
     setupStatus = ''
     try {
-      const result = await window.electronAPI.startLlamaCpp()
+      await window.electronAPI.startLlamaCpp()
       lsInfo = await window.electronAPI.getLlamaCppInfo()
     } catch (e) {
       console.error('Failed to start llama-server:', e)
@@ -145,37 +145,9 @@
     }
   }
 
-  const downloadModel = async () => {
-    if (!downloadRepo.trim() || !downloadFile.trim()) return
-    downloading = true
-    downloadProgress = 0
-    try {
-      await window.electronAPI.downloadHfModel(downloadRepo.trim(), downloadFile.trim())
-    } catch (e) {
-      console.error('Failed to download model:', e)
-      downloading = false
-    }
-  }
-
-  const removeModel = async (repo: string, filename: string) => {
-    deleting = `${repo}/${filename}`
-    try {
-      await window.electronAPI.deleteHfModel(repo, filename)
-      models = await window.electronAPI.listHfModels()
-    } catch (e) {
-      console.error('Failed to delete model:', e)
-    }
-    deleting = null
-  }
-
   const installed = $derived(!!lsInfo?.binaryPath)
 
-  const formatSize = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-  }
+
 </script>
 
 {#if !loaded}

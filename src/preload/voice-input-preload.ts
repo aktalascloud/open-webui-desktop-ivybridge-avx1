@@ -1,5 +1,7 @@
 import { ipcRenderer, contextBridge } from 'electron'
 
+export type VoiceInputAPI = typeof api
+
 const api = {
   // Main process tells us to start/stop recording
   onRecordingState: (

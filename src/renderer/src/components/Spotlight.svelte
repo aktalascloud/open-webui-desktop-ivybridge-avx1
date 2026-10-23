@@ -92,7 +92,7 @@
     }
   }
 
-  const onMouseUp = async (e: MouseEvent) => {
+  const onMouseUp = async () => {
     if (barDragging) {
       barDragging = false
       api?.savePosition({ x: barX, y: barY })

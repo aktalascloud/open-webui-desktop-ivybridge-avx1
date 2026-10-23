@@ -21,7 +21,7 @@
   let mediaStream: MediaStream | null = null
   let analyser: AnalyserNode | null = null
   let audioCtx: AudioContext | null = null
-  let dataArray: Uint8Array | null = null
+  let dataArray: Uint8Array<ArrayBuffer> | null = null
 
   // Dragging
   let dragging = false

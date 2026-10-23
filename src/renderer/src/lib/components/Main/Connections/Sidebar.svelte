@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fly, fade } from 'svelte/transition'
-  import { connections, config, appInfo, serverInfo } from '../../../stores'
+  import { appInfo } from '../../../stores'
   import i18n from '../../../i18n'
 
   interface Props {
@@ -31,7 +31,6 @@
     serverReachable,
     settingsOpen = $bindable(false),
     onConnect,
-    onDisconnect,
     onAddView,
     onOpenSettings,
     onRename,
@@ -95,10 +94,6 @@
   <div class="flex-1 min-h-0 overflow-y-auto px-2">
     <!-- Pinned: Open WebUI (local) -->
     {#if localConn && localInstalled}
-      {@const isServerLoading =
-        connectingId === localConn.id ||
-        serverStatus === 'starting' ||
-        (serverStatus === 'running' && !serverReachable)}
       <div
         class="w-full px-2.5 py-1.5 rounded-xl group flex items-center gap-2 transition-colors cursor-pointer {activeConnectionId === localConn.id
           ? 'bg-black/[0.08] dark:bg-white/[0.08]'

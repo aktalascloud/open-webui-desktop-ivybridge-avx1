@@ -37,7 +37,6 @@
     activeConnectionId,
     connectingId,
     openConnections,
-    localConn,
     localInstalled,
     remoteConnections,
     installPhase = $bindable('idle'),
@@ -117,11 +116,15 @@
   }
 
   // Attach load event listeners and IPC forwarding to webviews
-  onMount(async () => {
-    // Fetch the content preload path once
+  onMount(() => {
+    let disposed = false
+    let observer: MutationObserver | undefined
+    const initialize = async () => {
+    // Fetch the content preload path once; do not attach after unmount.
     contentPreloadPath = await window.electronAPI.getContentPreloadPath()
+    if (disposed) return
 
-    const observer = new MutationObserver(() => {
+    observer = new MutationObserver(() => {
       const container = document.querySelector('.content-webview-container')
       if (!container) return
       const webviews = container.querySelectorAll('webview')
@@ -253,7 +256,9 @@
       observer.observe(target, { childList: true, subtree: true })
     }
 
-    return () => observer.disconnect()
+    }
+    void initialize().catch((error) => console.error('Failed to initialize connection view:', error))
+    return () => { disposed = true; observer?.disconnect() }
   })
 </script>
 
