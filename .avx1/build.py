@@ -45,6 +45,7 @@ def build_python(project, package, manifest):
     environment = dict(os.environ, CYPRESS_INSTALL_BINARY="0", HUSKY="0", PIP_DISABLE_PIP_VERSION_CHECK="1")
     run(sys.executable, "-m", "pip", "install", "build", "hatchling", "wheel")
     if project == "webui":
+        run("node", "--test", ROOT / ".avx1/frontend_contract.test.mjs", env=environment)
         # The reviewed hatch hook uses npm ci and the checked-in lockfile.
         run(sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", wheels, env=environment)
         run("npm", "audit", "--omit=dev", "--audit-level=high", env=environment)
@@ -102,6 +103,7 @@ def build_conduit(package, manifest, channel):
     run("git", "-C", flutter_root, "switch", "--create", "stable")
     flutter = flutter_root / "bin/flutter"
     dart = flutter_root / "bin/dart"
+    os.environ["PATH"] = str(flutter_root / 'bin') + os.pathsep + os.environ['PATH']
     run(flutter, "--version")
     run("git", "submodule", "update", "--init", "--recursive", "--depth", "1", "third_party/katex", "third_party/mermaid")
     run(flutter, "pub", "get", "--enforce-lockfile")

@@ -448,6 +448,8 @@ export const installPackage = (packageName: string, version?: string, onStatus?:
         'uv',
         'pip',
         'install',
+        '--python',
+        pythonPath,
         ...(version ? [`${packageName}==${version}`] : [packageName, '-U'])
       ],
       {
@@ -504,7 +506,7 @@ export const isPackageInstalled = (packageName: string): boolean => {
   const pythonPath = getPythonPath()
   if (!fs.existsSync(pythonPath)) return false
   try {
-    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', packageName], {
+    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', '--python', pythonPath, packageName], {
       encoding: 'utf-8',
       env: pythonEnv()
     })
@@ -518,7 +520,7 @@ export const getPackageVersion = (packageName: string): string | null => {
   const pythonPath = getPythonPath()
   if (!fs.existsSync(pythonPath)) return null
   try {
-    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', packageName], {
+    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', '--python', pythonPath, packageName], {
       encoding: 'utf-8',
       env: pythonEnv()
     })
