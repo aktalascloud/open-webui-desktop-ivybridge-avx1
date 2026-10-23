@@ -7,6 +7,5 @@
     {
       "path": "./tsconfig.web.json"
     }
-  ],
-  "extends": "./tsconfig.web.json"
+  ]
 }
