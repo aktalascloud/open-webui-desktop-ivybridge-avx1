@@ -98,7 +98,8 @@ def install(project,python,archive,manifest):
         wheels=list((package/'wheels').glob('*.whl'))
         if manifest.get('native_json',{}).get('default')=='stock':wheels=[p for p in wheels if not p.name.startswith('orjson-')]
         print('Установка оптимизированного пакета и проверенных зависимостей…',flush=True)
-        subprocess.run([str(new_python),'-m','pip','install','--no-cache-dir','--disable-pip-version-check','--no-input','--constraint',str(constraints),*map(str,wheels)],check=True)
+        environment={key:value for key,value in os.environ.items() if key not in ('PYTHONHOME','PYTHONPATH')}
+        subprocess.run([str(new_python),'-I','-m','pip','install','--no-cache-dir','--disable-pip-version-check','--no-input','--constraint',str(constraints),*map(str,wheels)],check=True,env=environment)
         check="import importlib.metadata as m; import uv; assert m.version('open-webui'); import mcp; import orjson" if project=='webui' else "import importlib.metadata as m; import uv; assert m.version('open-terminal'); import open_terminal.cli"
         subprocess.run([str(new_python),'-I','-c',check],check=True)
         subprocess.run([str(new_python),'-I','-m','uv','--version'],check=True)

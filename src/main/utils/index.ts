@@ -417,7 +417,6 @@ export const isUvInstalled = (installationDir?: string) => {
 }
 
 export const uninstallPython = (installationDir?: string): boolean => {
-  if (runtimePin && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) throw new Error('Контрольная сумма Python не совпала. Установка отменена.')
   installationDir = installationDir || getPythonInstallationDir()
   if (!fs.existsSync(installationDir)) {
     log.error('Python installation not found')
@@ -461,8 +460,11 @@ const installForkPackage = async (packageName: string, version?: string, onStatu
   }
   if (version) argumentsList.push('--tag', version)
   onStatus?.('Установка проверенной оптимизированной сборки форка…')
+  const childEnvironment = pythonEnv()
+  delete childEnvironment.PYTHONHOME
+  delete childEnvironment.PYTHONPATH
   return new Promise((resolve, reject) => {
-    const child = execFile(interpreter, argumentsList, { env: pythonEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
+    const child = execFile(interpreter, argumentsList, { env: childEnvironment, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
     let lastLine = ''
     const status = (data: Buffer) => { const line = data.toString().trim(); if (line) { lastLine = line.split('\n').at(-1) || line; onStatus?.(lastLine) } }
     child.stdout?.on('data', status)
