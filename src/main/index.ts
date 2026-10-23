@@ -2,6 +2,7 @@
 
 import {
   app,
+  net,
   shell,
   session,
   clipboard,
@@ -913,6 +914,23 @@ const connectTo = async (connection: Connection) => {
 let activePtyDataDisposable: { dispose: () => void } | null = null
 
 const startServerHandler = async (): Promise<boolean> => {
+  const managedConfig = await getConfig()
+  if (managedConfig.localServer?.managedBackend === true) {
+    log.debug('// CODE_MANAGED_BACKEND_V1')
+    const managedUrl = `http://127.0.0.1:${managedConfig.localServer?.port ?? 8080}`
+    const response = await net.fetch(`${managedUrl}/health`, { signal: AbortSignal.timeout(5000) }).catch(() => null)
+    if (!response?.ok || (await response.json().catch(() => null))?.status !== true) {
+      throw new Error('Managed backend is unavailable. Start it using the project launcher.')
+    }
+    SERVER_URL = managedUrl
+    SERVER_PID = null
+    SERVER_STATUS = 'started'
+    SERVER_REACHABLE = true
+    sendToRenderer('status:server', SERVER_STATUS)
+    sendToRenderer('server:ready', { url: SERVER_URL })
+    updateTray()
+    return true
+  }
   if (SERVER_STATUS === 'starting' || SERVER_STATUS === 'started') {
     log.info('[server] Already running or starting, skipping duplicate start')
     return true
@@ -1199,7 +1217,7 @@ if (!gotTheLock) {
   app.whenReady().then(async () => {
     CONFIG = await getConfig()
     loadSpotlightPosition()
-    log.info('Config:', CONFIG)
+    log.info('Config loaded')
 
     app.name = 'Open WebUI'
     if (process.platform === 'darwin' && app.dock) {

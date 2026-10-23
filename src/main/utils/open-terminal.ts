@@ -113,7 +113,7 @@ export const startOpenTerminal = async (
     '--cwd', cwd
   ]
 
-  log.info('Starting Open Terminal...', pythonPath, commandArgs.join(' '))
+  log.info('Starting Open Terminal...', pythonPath)
 
   let spawned: pty.IPty
   try {
