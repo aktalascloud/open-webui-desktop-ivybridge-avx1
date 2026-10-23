@@ -13,5 +13,10 @@
     "id": "DESK-003",
     "description": "Security-maintained Electron 45; modern Svelte type resolution; explicit managed backend reuse; no credential-bearing config/command logs; uv targets the selected Python.",
     "source": "Official Electron/npm releases and generic owner-authored managed-backend integration."
+  },
+  {
+    "id": "DESK-004",
+    "description": "Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes.",
+    "source": "Local source review and Svelte/TypeScript diagnostics."
   }
 ]

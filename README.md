@@ -12,8 +12,10 @@ Extract the appropriate archive and run `Install.cmd`. `Install.cmd -CheckOnly` 
 
 | ID | Change | Source |
 |---|---|---|
-| DESK-001 | Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity. | local |
-| DESK-002 | Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine. | local recipe |
+| DESK-001 | Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity. | `.avx1/PATCHES.json` |
+| DESK-002 | Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine. | `.avx1/PATCHES.json` |
+| DESK-003 | Security-maintained Electron 45; modern Svelte type resolution; explicit managed backend reuse; no credential-bearing config/command logs; uv targets the selected Python. | `.avx1/PATCHES.json` |
+| DESK-004 | Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes. | `.avx1/PATCHES.json` |
 
 ## Measurements
 
@@ -23,7 +25,7 @@ Extract the appropriate archive and run `Install.cmd`. `Install.cmd -CheckOnly` 
 | JSON on Ivy Bridge | Pending stock/optimized comparison |
 | Android runtime performance | Not measured on a physical phone |
 
-Unmeasured changes have no claimed percentage. JSON timings cover serialization/parsing, not tokens/s. PGO, LTO and ISA flags apply only to the named native components; they do not turn Python or TypeScript into native code. AVX2/FMA and fast-math are not enabled.
+Unmeasured changes have no claimed percentage. JSON timings cover serialization/parsing, not tokens/s. LTO and ISA flags apply only to the named native components; they do not turn Python or TypeScript into native code. AVX2/FMA and fast-math are not enabled.
 
 ## Licensing and compatibility
 
