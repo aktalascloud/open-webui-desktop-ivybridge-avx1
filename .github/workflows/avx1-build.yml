@@ -48,6 +48,8 @@ jobs:
           path: |
             .avx1-work/pip-audit.json
             .avx1-work/security-gate.json
+            .avx1-work/desktop-test-profile/russian-failure.png
+            .avx1-work/desktop-test-profile/renderer-state.json
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 3
