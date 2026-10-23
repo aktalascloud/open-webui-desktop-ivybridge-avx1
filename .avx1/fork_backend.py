@@ -78,7 +78,12 @@ def install(project,python,archive,manifest):
         with zipfile.ZipFile(archive) as bundle:bundle.extractall(package)
         pin=manifest['python'];tar_path=stage/'python.tar.gz'
         print('Подготовка проверенной среды Python…',flush=True)
-        download(pin['url'],tar_path,pin['sha256'])
+        runtime_cache=updates/'runtime-cache';runtime_cache.mkdir(exist_ok=True)
+        if runtime_cache.is_symlink():raise RuntimeError('Небезопасная папка кэша Python')
+        cached_runtime=runtime_cache/(pin['sha256']+'.tar.gz')
+        if not cached_runtime.exists() or digest(cached_runtime)!=pin['sha256']:
+            download(pin['url'],tar_path,pin['sha256']);tar_path.replace(cached_runtime)
+        tar_path=cached_runtime
         with tarfile.open(tar_path,'r:gz') as source:source.extractall(stage,filter='data')
         new_python=stage/'python/python.exe';site=stage/'python/Lib/site-packages';site.mkdir(parents=True,exist_ok=True)
         if not new_python.is_file():raise RuntimeError('Не найден Python в проверенном дистрибутиве')
@@ -120,6 +125,8 @@ def install(project,python,archive,manifest):
         if stage.resolve().is_relative_to(updates.resolve()) and not stage.is_symlink():shutil.rmtree(stage,ignore_errors=True)
 
 def main():
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'):stream.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser();parser.add_argument('--project',choices=REPOS,required=True);parser.add_argument('--python',required=True);parser.add_argument('--tag');args=parser.parse_args()
     root=Path(args.python).resolve().parent.parent
     with tempfile.TemporaryDirectory(prefix='owui-fork-download-') as cache:

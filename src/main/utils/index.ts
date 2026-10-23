@@ -447,7 +447,7 @@ const installForkPackage = async (packageName: string, version?: string, onStatu
   const root = getInstallDir()
   let interpreter = getPythonPath()
   let script = app.isPackaged ? path.join(process.resourcesPath, 'fork_backend.py') : path.join(app.getAppPath(), '.avx1/fork_backend.py')
-  let argumentsList = ['-I', script, '--project', project, '--python', interpreter]
+  let argumentsList = ['-I', '-X', 'utf8', script, '--project', project, '--python', interpreter]
   if (config.localServer?.managedBackend === true) {
     script = path.join(root, 'maintenance/scripts/desktop_backend_update.py')
     const receipt = path.join(root, 'maintenance/state/self-test.json')
