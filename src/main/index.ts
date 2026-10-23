@@ -208,7 +208,7 @@ function tryRegisterShortcut(
     log.warn(`${label} shortcut "${accel}" could not be registered (returned false)`)
     if (!silent) {
       new Notification({
-        title: label,
+        title: nativeText(label),
         body: `${nativeText('Could not register shortcut')} \"${accel}\". ${nativeText('It may be in use by another application.')}`
       }).show()
     }
@@ -217,7 +217,7 @@ function tryRegisterShortcut(
     log.warn(`${label} shortcut "${accel}" registration threw:`, error)
     if (!silent) {
       new Notification({
-        title: label,
+        title: nativeText(label),
         body: `${nativeText('Failed to register shortcut')} \"${accel}\". ${nativeText('It may conflict with another application.')}`
       }).show()
     }
@@ -1183,7 +1183,7 @@ const resetAppHandler = async () => {
     new Notification({ title: nativeText('Open WebUI'), body: nativeText('Application has been reset.') }).show()
   } catch (error) {
     log.error('Failed to reset:', error)
-    new Notification({ title: nativeText('Open WebUI'), body: `Reset failed: ${error.message}` }).show()
+    new Notification({ title: nativeText('Open WebUI'), body: nativeText(`Reset failed: ${error.message}`) }).show()
   }
 }
 
@@ -2083,6 +2083,8 @@ if (!gotTheLock) {
 
     ipcMain.handle('dialog:selectFolder', async () => {
       const result = await dialog.showOpenDialog(mainWindow!, {
+        title: nativeText('Select a folder'),
+        buttonLabel: nativeText('Select folder'),
         properties: ['openDirectory']
       })
       return result.canceled ? null : result.filePaths[0] ?? null

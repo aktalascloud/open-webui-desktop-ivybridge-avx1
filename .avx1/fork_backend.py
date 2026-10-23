@@ -100,18 +100,20 @@ def install(project,python,archive,manifest):
         print('Установка оптимизированного пакета и проверенных зависимостей…',flush=True)
         environment={key:value for key,value in os.environ.items() if key not in ('PYTHONHOME','PYTHONPATH')}
         subprocess.run([str(new_python),'-I','-m','pip','install','--no-cache-dir','--disable-pip-version-check','--no-input','--constraint',str(constraints),'setuptools==84.2.1',*map(str,wheels)],check=True,env=environment)
+        subprocess.run([str(new_python),'-I','-m','pip','check'],check=True,env=environment)
         check="import importlib.metadata as m; import uv; assert m.version('open-webui'); import mcp; import orjson" if project=='webui' else "import importlib.metadata as m; import uv; assert m.version('open-terminal'); import open_terminal.cli"
         subprocess.run([str(new_python),'-I','-c',check],check=True)
         subprocess.run([str(new_python),'-I','-m','uv','--version'],check=True)
-        moved=False
+        moved=False;promoted=False
         try:
             runtime.rename(previous/'python');moved=True
-            (stage/'python').rename(runtime)
+            (stage/'python').rename(runtime);promoted=True
+            receipts[project]={'source_commit':manifest['source_commit'],'upstream_commit':manifest['upstream_commit'],'backup':str(previous)}
+            temporary=receipt_path.with_suffix('.tmp');temporary.write_text(json.dumps(receipts,indent=2),encoding='utf-8');temporary.replace(receipt_path)
         except Exception:
+            if promoted and runtime.exists():runtime.rename(stage/'failed-python')
             if moved and not runtime.exists():(previous/'python').rename(runtime)
             raise
-        receipts[project]={'source_commit':manifest['source_commit'],'upstream_commit':manifest['upstream_commit'],'backup':str(previous)}
-        temporary=receipt_path.with_suffix('.tmp');temporary.write_text(json.dumps(receipts,indent=2),encoding='utf-8');temporary.replace(receipt_path)
         print('Установлена проверенная сборка форка. Данные и настройки сохранены.',flush=True)
     finally:
         # Only this freshly created staging directory is removed.

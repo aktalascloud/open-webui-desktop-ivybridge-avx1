@@ -16,6 +16,8 @@ Object.entries({
   'Copy': 'Копировать',
   'Paste': 'Вставить',
   'Select All': 'Выделить всё',
+  'Select folder': 'Выбрать папку',
+  'Select a folder': 'Выберите папку',
   'Voice Input': 'Голосовой ввод',
   'Call': 'Голосовой вызов',
   'Voice Input Failed': 'Ошибка голосового ввода',
