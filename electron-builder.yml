@@ -84,5 +84,5 @@ flatpak:
 npmRebuild: true
 publish:
   provider: github
-  owner: open-webui
-  repo: desktop
+  owner: aktalascloud
+  repo: open-webui-desktop-ivybridge-avx1

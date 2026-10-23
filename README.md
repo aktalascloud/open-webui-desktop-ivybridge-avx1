@@ -1,80 +1,32 @@
-# Open WebUI Desktop
+# Open WebUI Desktop · Ivy Bridge AVX1
 
-[![Version](https://img.shields.io/github/v/release/open-webui/desktop?label=version&color=%2331c48d)](https://github.com/open-webui/desktop/releases)
-[![Downloads](https://img.shields.io/github/downloads/open-webui/desktop/total?color=%23764abc)](https://github.com/open-webui/desktop/releases)
-[![Discord](https://img.shields.io/discord/1170866489302188073?label=discord&color=%235865F2)](https://discord.gg/open-webui)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[English](README.md) · [Русский](README.ru.md)
 
-![Open WebUI Desktop](./demo.png)
+Experimental builds for personal compatibility and performance testing. Upstream application names and interface branding are retained.
 
-Your AI, right on your desktop. [Open WebUI](https://github.com/open-webui/open-webui) as a native app. Run models locally or connect to any server. No Docker, no terminal, no setup. Download, launch, chat.
+[Upstream project](https://github.com/open-webui/desktop) · [Packages](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases)
 
-> [!WARNING]
-> **Early Alpha.** Things move fast and stuff might break. [Report bugs](https://github.com/open-webui/desktop/issues) or [come hang out on Discord](https://discord.gg/open-webui).
+Extract the appropriate archive and run `Install.cmd`. `Install.cmd -CheckOnly` verifies integrity without installing. Packages exclude personal configuration, credentials, history, caches and model weights. Models download from Hugging Face on demand.
 
-## Download
+## Patches
 
-| Platform | Installer |
-|----------|-----------|
-| macOS (Apple Silicon) | [**Download .dmg**](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64.dmg) |
-| macOS (Intel) | [**Download .dmg**](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64.dmg) |
-| Windows x64 | [**Download .exe**](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64-setup.exe) |
-| Windows ARM64 | [**Download .exe**](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64-setup.exe) |
-| Linux x64 (AppImage) | [**Download .AppImage**](https://github.com/open-webui/desktop/releases/latest/download/open-webui_x64.AppImage) |
-| Linux x64 (Debian/Ubuntu) | [**Download .deb**](https://github.com/open-webui/desktop/releases/latest/download/open-webui_amd64.deb) |
-| Linux x64 (Snap) | [**Download .snap**](https://github.com/open-webui/desktop/releases/latest/download/open-webui_amd64.snap) |
-| Linux x64 (Flatpak) | [**Download .flatpak**](https://github.com/open-webui/desktop/releases/latest/download/open-webui.flatpak) |
-| Linux ARM64 (AppImage) | [**Download .AppImage**](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.AppImage) |
-| Linux ARM64 (Debian/Ubuntu) | [**Download .deb**](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.deb) |
+| ID | Change | Source |
+|---|---|---|
+| DESK-001 | Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity. | local |
+| DESK-002 | Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine. | local recipe |
 
-Internet required on first launch. After that, everything works offline. [All releases →](https://github.com/open-webui/desktop/releases)
+## Measurements
 
-## How It Works
+| Metric | Verified improvement |
+|---|---|
+| LLM generation throughput | Not measured |
+| JSON on Ivy Bridge | Pending stock/optimized comparison |
+| Android runtime performance | Not measured on a physical phone |
 
-🖥️ **Run locally.** The app runs Open WebUI on your machine. You can optionally enable the built-in llama.cpp engine to download and run models offline. Nothing leaves your computer.
+Unmeasured changes have no claimed percentage. JSON timings cover serialization/parsing, not tokens/s. PGO, LTO and ISA flags apply only to the named native components; they do not turn Python or TypeScript into native code. AVX2/FMA and fast-math are not enabled.
 
-☁️ **Connect remotely.** Point the app at any Open WebUI server. Switch between multiple connections from the sidebar.
+## Licensing and compatibility
 
-Use both at the same time.
+Original licenses, notices and license history are preserved. Each binary package includes its corresponding source. Private signing keys stay outside the repository. APKs use a separate application ID.
 
-## Highlights
-
-- ⚡ **Spotlight.** Hit `Shift+Cmd+I` (macOS) or `Shift+Ctrl+I` (Windows/Linux) to summon a floating chat bar over whatever you're doing. Drag to screenshot anything on screen.
-- 🎙️ **Voice input.** System-wide push-to-talk. Press the shortcut from any app to record, and your speech is transcribed and sent to your chat automatically.
-- 🧠 **Local inference.** Optionally run models entirely on your hardware via the built-in llama.cpp engine. Your data never leaves your machine.
-- 🎯 **One-click setup.** Launch and connect to a server in seconds. Local models can be enabled from the settings.
-- 🔌 **Multiple connections.** Juggle servers and switch between them instantly.
-- 🔄 **Auto-updates.** New releases land in the background.
-- 📡 **Offline-ready.** No internet needed after initial setup.
-- 💻 **Cross-platform.** macOS, Windows, and Linux.
-
-## System Requirements
-
-|  | Local Models | Remote Only |
-|--|-------------|-------------|
-| **Disk** | 5 GB+ | ~500 MB |
-| **RAM** | 16 GB+ | 4 GB |
-| **OS** | macOS 12+, Windows 10+, modern Linux (glibc 2.28+) | Same |
-
-> [!NOTE]
-> Local models need serious RAM (7B ≈ 8 GB, 13B ≈ 16 GB). Lighter machine? Connect to a remote server instead.
-
-## Privacy
-
-No telemetry. No tracking. No phone-home. Your conversations stay on your machine. Period.
-
-## Community
-
-- 💬 [Discord](https://discord.gg/open-webui) - Come hang out
-- 🐛 [Issues](https://github.com/open-webui/desktop/issues) - Report bugs or request features
-- 🌐 [Open WebUI](https://github.com/open-webui/open-webui) - The main project
-- 📖 [Docs](https://docs.openwebui.com) - Full documentation
-
-## Contributing
-
-```bash
-npm install
-npm run dev
-```
-
-See [CHANGELOG.md](CHANGELOG.md) for release history. Licensed under [AGPL-3.0](LICENSE).
+Local deployment additionally checks the owner's private filter and Telegram bridge. Their source, settings and data are not published. Unreviewed PR/fork changes remain candidates; accepted upstream fixes arrive through merges of official branches.

@@ -7,3 +7,10 @@ out
 .eslintcache
 *.log*
 *.tsbuildinfo
+
+# Fork build outputs and private material
+.avx1-work/
+.avx1-out/
+*.p12
+*.jks
+android/key.properties

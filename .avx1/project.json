@@ -1,0 +1,12 @@
+{
+  "id": "desktop",
+  "slug": "open-webui-desktop-ivybridge-avx1",
+  "upstream": "open-webui/desktop",
+  "development": "main",
+  "runner": "windows-2022",
+  "description": "Open WebUI Desktop experiments for Ivy Bridge AVX1, with rebuilt native terminal support and reproducible Windows packages.",
+  "repository": "aktalascloud/open-webui-desktop-ivybridge-avx1",
+  "channel": "development",
+  "upstream_commit": "0931b46d66e06bfb7d0b6a4aa065e6db338a1000",
+  "stable_tag": "v0.0.20"
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "DESK-001",
+    "description": "Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity.",
+    "source": "local"
+  },
+  {
+    "id": "DESK-002",
+    "description": "Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine.",
+    "source": "local recipe"
+  }
+]
