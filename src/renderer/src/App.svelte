@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { fade } from 'svelte/transition'
   import { appInfo, config, connections, serverInfo, appState } from './lib/stores'
 
   import Main from './lib/components/Main.svelte'

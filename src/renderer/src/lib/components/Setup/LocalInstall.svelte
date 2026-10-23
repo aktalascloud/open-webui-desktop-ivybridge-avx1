@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fade, fly } from 'svelte/transition'
+  import { fade } from 'svelte/transition'
   import { onMount } from 'svelte'
   import { config, serverInfo } from '../../stores'
   import i18n from '../../i18n'
@@ -31,7 +31,7 @@
       if (!ok) { phase = 'error'; errorMsg = $i18n.t('setup.install.failed'); return }
 
       await window.electronAPI.startServer()
-      const info = await window.electronAPI.getServerInfo()
+      await window.electronAPI.getServerInfo()
 
       await window.electronAPI.setDefaultConnection('local')
       config.set(await window.electronAPI.getConfig())

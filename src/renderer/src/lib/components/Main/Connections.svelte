@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount } from 'svelte'
   import { fade } from 'svelte/transition'
-  import { connections, config, serverInfo, appState } from '../../stores'
+  import { connections, config, serverInfo } from '../../stores'
   import i18n from '../../i18n'
 
   import Sidebar from './Connections/Sidebar.svelte'
@@ -21,7 +21,6 @@
     activeConnectionName = $bindable('')
   }: Props = $props()
 
-  let isLocalConnection = $state(false)
   let showingLogs = $state(false)
 
   let url = $state('')
@@ -35,7 +34,6 @@
   let toastTimeout: ReturnType<typeof setTimeout> | null = null
   let installStatus = $state('')
   let settingsOpen = $state(false)
-  let connectedUrl = $state('')
   let activeConnectionId = $state('')
   let connectingId = $state('')
   let openConnections: Map<string, string> = $state(new Map())
@@ -49,7 +47,6 @@
   const serverStatus = $derived($serverInfo?.status)
   const serverReachable = $derived($serverInfo?.reachable)
 
-  const isInitializing = $derived($appState === 'initializing')
   const localConn = $derived(localInstalled
     ? { id: 'local', name: 'Open WebUI', type: 'local' as const, url: `http://127.0.0.1:${$config?.localServer?.port ?? 8080}` }
     : null
@@ -58,11 +55,10 @@
 
   // Open Terminal state
   let openTerminalStatus = $state<string | null>(null)
-  let openTerminalInfo = $state<{ url?: string; apiKey?: string } | null>(null)
 
   // Llama Server state
   let llamaCppStatus = $state<string | null>(null)
-  let llamaCppInfo = $state<{ url?: string; pid?: number } | null>(null)
+  let llamaCppInfo = $state<{ url?: string; pid?: number; binaryPath?: string } | null>(null)
   let llamaCppSetupStatus = $state('')
   let openTerminalSetupStatus = $state('')
 
@@ -109,7 +105,7 @@
 
       installStatus = $i18n.t('main.install.startingServer')
       await window.electronAPI.startServer()
-      const info = await window.electronAPI.getServerInfo()
+      await window.electronAPI.getServerInfo()
 
       installStatus = $i18n.t('main.install.settingUpConnection')
       await window.electronAPI.setDefaultConnection('local')
@@ -190,7 +186,6 @@
     if (activeConnectionId === id && view === 'connected') {
       connectingId = ''
       activeConnectionId = ''
-      connectedUrl = ''
       view = 'welcome'
       return
     }
@@ -200,7 +195,6 @@
     if (openConnections.has(id)) {
       connectingId = ''
       activeConnectionId = id
-      connectedUrl = openConnections.get(id)!
       view = 'connected'
       return
     }
@@ -221,7 +215,6 @@
           openConnections = new Map(openConnections)
         }
         if (connectingId === id) {
-          connectedUrl = result.url
           activeConnectionId = result.connectionId
           connectingId = ''
           if (installPhase !== 'working') {
@@ -236,14 +229,12 @@
       connectingId = ''
       openConnections.set(id, conn.url)
       openConnections = new Map(openConnections)
-      connectedUrl = conn.url
       view = 'connected'
     }
   }
 
   const disconnect = () => {
     activeConnectionId = ''
-    connectedUrl = ''
     view = 'welcome'
   }
 
@@ -260,11 +251,9 @@
   $effect(() => {
     if (activeConnectionId === 'local') {
       activeConnectionName = localConn?.name ?? 'Open WebUI'
-      isLocalConnection = true
     } else {
       const conn = ($connections ?? []).find((c) => c.id === activeConnectionId)
       activeConnectionName = conn?.name ?? ''
-      isLocalConnection = false
     }
   })
 
@@ -373,7 +362,6 @@
         }
 
         if (view !== 'connected') {
-          connectedUrl = openConnections.get(connId) ?? incomingUrl
           activeConnectionId = connId
           if (installPhase !== 'working') view = 'connected'
         }
@@ -390,9 +378,7 @@
         if (!openConnections.has(connId)) {
           openConnections.set(connId, baseUrl)
           openConnections = new Map(openConnections)
-          connectedUrl = baseUrl
         } else {
-          connectedUrl = openConnections.get(connId)!
         }
         activeConnectionId = connId
         if (installPhase !== 'working') view = 'connected'
@@ -412,9 +398,7 @@
         if (!openConnections.has(connId)) {
           openConnections.set(connId, baseUrl)
           openConnections = new Map(openConnections)
-          connectedUrl = baseUrl
         } else {
-          connectedUrl = openConnections.get(connId)!
         }
         activeConnectionId = connId
         if (installPhase !== 'working') view = 'connected'
@@ -429,7 +413,7 @@
       // ── Desktop-only state (not forwarded to webviews) ─
       if (data.type === 'status:open-terminal') { openTerminalStatus = data.data; return }
       if (data.type === 'status:open-terminal-setup') { openTerminalSetupStatus = data.data ?? ''; return }
-      if (data.type === 'open-terminal:ready') { openTerminalInfo = data.data; openTerminalStatus = 'started'; openTerminalSetupStatus = ''; return }
+      if (data.type === 'open-terminal:ready') { openTerminalStatus = 'started'; openTerminalSetupStatus = ''; return }
       if (data.type === 'status:llamacpp') { llamaCppStatus = data.data; return }
       if (data.type === 'status:llamacpp-setup') { llamaCppSetupStatus = data.data ?? ''; return }
       if (data.type === 'llamacpp:ready') { llamaCppInfo = data.data; llamaCppStatus = 'started'; llamaCppSetupStatus = ''; return }
@@ -459,7 +443,6 @@
     window.electronAPI.getOpenTerminalInfo().then((info: any) => {
       if (info?.status) {
         openTerminalStatus = info.status
-        openTerminalInfo = info
       }
     })
 
@@ -490,14 +473,12 @@
       openTerminalStatus = 'stopping'
       await window.electronAPI.stopOpenTerminal()
       openTerminalStatus = null
-      openTerminalInfo = null
       openTerminalSetupStatus = ''
     } else {
       openTerminalStatus = 'starting'
       openTerminalSetupStatus = ''
       const result = await window.electronAPI.startOpenTerminal()
       if (result) {
-        openTerminalInfo = result
         openTerminalStatus = 'started'
       } else {
         openTerminalStatus = 'failed'
@@ -554,7 +535,7 @@
 
     <Content
       {sidebarOpen}
-      bind:view
+      {view}
       {activeConnectionId}
       {connectingId}
       {openConnections}

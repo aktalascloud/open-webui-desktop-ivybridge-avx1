@@ -33,7 +33,6 @@
   let stopping = $state(false)
 
   let panelHeight = $state(250)
-  let dragging = $state(false)
   let startY = 0
   let startHeight = 0
   let copied = $state(false)
@@ -48,7 +47,6 @@
   }
 
   const onDragStart = (e: MouseEvent) => {
-    dragging = true
     startY = e.clientY
     startHeight = panelHeight
 
@@ -63,8 +61,7 @@
     }
 
     const onDragEnd = () => {
-      dragging = false
-      overlay.remove()
+        overlay.remove()
       window.removeEventListener('mousemove', onDragMove)
       window.removeEventListener('mouseup', onDragEnd)
     }

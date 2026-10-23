@@ -48,6 +48,8 @@ ipcRenderer.on('llamacpp:pty:port', (event, _data) => {
   port.start()
 })
 
+export type DesktopAPI = typeof api
+
 const api = {
   onData: (callback: (data: any) => void) => {
     const handler = (_: any, data: any): void => callback(data)
