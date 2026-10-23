@@ -4,9 +4,10 @@
   "upstream": "open-webui/desktop",
   "development": "main",
   "runner": "windows-2022",
-  "description": "Open WebUI Desktop experiments for Ivy Bridge AVX1, with rebuilt native terminal support and reproducible Windows packages.",
+  "description": "Open WebUI Desktop: Ivy Bridge AVX1/LTCG, EXE installer, optimized WebUI fork; extended Russian UI and menus / дополненный перевод интерфейса и меню на русский.",
   "repository": "aktalascloud/open-webui-desktop-ivybridge-avx1",
-  "channel": "development",
+  "channel": "latest",
   "upstream_commit": "0931b46d66e06bfb7d0b6a4aa065e6db338a1000",
-  "stable_tag": "v0.0.20"
+  "stable_tag": "v0.0.20",
+  "distribution": "single NSIS EXE installer"
 }

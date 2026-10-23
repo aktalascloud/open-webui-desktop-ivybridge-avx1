@@ -86,6 +86,7 @@ import {
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
 
 import log from 'electron-log'
+import { nativeText, setNativeLanguage } from './native-i18n'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
 
 import icon from '../../resources/icon.png?asset'
@@ -208,7 +209,7 @@ function tryRegisterShortcut(
     if (!silent) {
       new Notification({
         title: label,
-        body: `Could not register shortcut "${accel}". It may be in use by another application.`
+        body: `${nativeText('Could not register shortcut')} \"${accel}\". ${nativeText('It may be in use by another application.')}`
       }).show()
     }
     return false
@@ -217,7 +218,7 @@ function tryRegisterShortcut(
     if (!silent) {
       new Notification({
         title: label,
-        body: `Failed to register shortcut "${accel}". It may conflict with another application.`
+        body: `${nativeText('Failed to register shortcut')} \"${accel}\". ${nativeText('It may conflict with another application.')}`
       }).show()
     }
     return false
@@ -497,8 +498,8 @@ async function toggleVoiceInput(): Promise<void> {
       if (!granted) {
         log.warn('Voice input: microphone permission denied')
         new Notification({
-          title: 'Voice Input',
-          body: 'Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone, then restart the app.'
+          title: nativeText('Voice Input'),
+          body: nativeText('Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone, then restart the app.')
         }).show()
         return
       }
@@ -511,8 +512,8 @@ async function toggleVoiceInput(): Promise<void> {
     if (!conn) {
       log.warn('Voice input: no connection configured')
       new Notification({
-        title: 'Voice Input',
-        body: 'No connection configured. Set up a connection in Settings before using voice input.'
+        title: nativeText('Voice Input'),
+        body: nativeText('No connection configured. Set up a connection in Settings before using voice input.')
       }).show()
       return
     }
@@ -549,8 +550,8 @@ async function toggleCall(): Promise<void> {
     if (!conn) {
       log.warn('Call: no connection configured')
       new Notification({
-        title: 'Call',
-        body: 'No connection configured. Set up a connection in Settings before using the call shortcut.'
+        title: nativeText('Call'),
+        body: nativeText('No connection configured. Set up a connection in Settings before using the call shortcut.')
       }).show()
       return
     }
@@ -769,6 +770,7 @@ function createContentWindow(url: string, connectionId: string): BrowserWindow {
 // ─── Tray ───────────────────────────────────────────────
 
 const updateTray = () => {
+  setNativeLanguage(CONFIG?.language)
   if (!tray || !CONFIG) return
 
   // Remote connections from config
@@ -784,7 +786,7 @@ const updateTray = () => {
   // Virtual local connection (when package is installed)
   const localItem = isPackageInstalled('open-webui')
     ? [{
-        label: `${CONFIG.defaultConnectionId === 'local' ? '★ ' : ''}Open WebUI (Local)`,
+        label: `${CONFIG.defaultConnectionId === 'local' ? '★ ' : ''}${nativeText('Open WebUI (Local)')}`,
         sublabel: SERVER_URL || `http://127.0.0.1:${CONFIG.localServer?.port ?? 8080}`,
         click: async () => {
           const result = await connectTo(buildLocalConnection())
@@ -797,7 +799,7 @@ const updateTray = () => {
 
   const trayMenuTemplate = [
     {
-      label: 'Show Open WebUI',
+      label: nativeText('Show Open WebUI'),
       click: () => {
         mainWindow?.show()
         mainWindow?.focus()
@@ -806,7 +808,7 @@ const updateTray = () => {
     { type: 'separator' },
     ...(allItems.length > 0
       ? [
-          { label: 'Connections', enabled: false },
+          { label: nativeText('Connections'), enabled: false },
           ...allItems,
           { type: 'separator' }
         ]
@@ -814,7 +816,7 @@ const updateTray = () => {
     ...(SERVER_STATUS === 'started' && SERVER_URL
       ? [
           {
-            label: `Local: ${SERVER_URL}`,
+            label: `${nativeText('Local')}: ${SERVER_URL}`,
             click: () => {
               if (SERVER_URL) clipboard.writeText(SERVER_URL)
             }
@@ -823,7 +825,7 @@ const updateTray = () => {
         ]
       : []),
     {
-      label: 'Quit Open WebUI',
+      label: nativeText('Quit Open WebUI'),
       accelerator: 'CommandOrControl+Q',
       click: async () => {
         await stopServerHandler()
@@ -1015,7 +1017,7 @@ const connectPtyPort = (pid?: number): void => {
       log.info('pty:connect — server is starting, no PID yet')
     } else {
       log.info('pty:connect — no active server')
-      port1.postMessage({ type: 'output', data: '[No active server process]\r\n' })
+      port1.postMessage({ type: 'output', data: CONFIG?.localServer?.managedBackend === true ? '[Сервер работает отдельно от Desktop]\r\n' : '[Нет дочернего процесса сервера]\r\n' })
     }
     mainWindow.webContents.postMessage('pty:port', { pid: 0 }, [port2])
     return
@@ -1178,16 +1180,18 @@ const resetAppHandler = async () => {
     await new Promise((resolve) => setTimeout(resolve, 1000))
     await resetApp()
     CONFIG = await getConfig() // reload from defaults since config.json was deleted
-    new Notification({ title: 'Open WebUI', body: 'Application has been reset.' }).show()
+    new Notification({ title: nativeText('Open WebUI'), body: nativeText('Application has been reset.') }).show()
   } catch (error) {
     log.error('Failed to reset:', error)
-    new Notification({ title: 'Open WebUI', body: `Reset failed: ${error.message}` }).show()
+    new Notification({ title: nativeText('Open WebUI'), body: `Reset failed: ${error.message}` }).show()
   }
 }
 
 // ─── Helpers ────────────────────────────────────────────
 
 const sendToRenderer = (type: string, data?: any) => {
+  if (type === 'status:install' && typeof data === 'string') data = nativeText(data)
+  if (type === 'error' && data?.message) data = { ...data, message: nativeText(data.message) }
   mainWindow?.webContents.send('main:data', { type, data })
 }
 
@@ -1374,11 +1378,11 @@ if (!gotTheLock) {
           // Link handling
           if (params.linkURL) {
             menuItems.push({
-              label: 'Open Link in Browser',
+              label: nativeText('Open Link in Browser'),
               click: () => openUrl(params.linkURL)
             })
             menuItems.push({
-              label: 'Copy Link',
+              label: nativeText('Copy Link'),
               click: () => clipboard.writeText(params.linkURL)
             })
             menuItems.push({ type: 'separator' })
@@ -1387,18 +1391,18 @@ if (!gotTheLock) {
           // Editable field actions (input, textarea, contenteditable)
           if (params.isEditable) {
             menuItems.push(
-              { label: 'Undo', role: 'undo', enabled: params.editFlags.canUndo },
-              { label: 'Redo', role: 'redo', enabled: params.editFlags.canRedo },
+              { label: nativeText('Undo'), role: 'undo', enabled: params.editFlags.canUndo },
+              { label: nativeText('Redo'), role: 'redo', enabled: params.editFlags.canRedo },
               { type: 'separator' },
-              { label: 'Cut', role: 'cut', enabled: params.editFlags.canCut },
-              { label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy },
-              { label: 'Paste', role: 'paste', enabled: params.editFlags.canPaste },
-              { label: 'Select All', role: 'selectAll', enabled: params.editFlags.canSelectAll }
+              { label: nativeText('Cut'), role: 'cut', enabled: params.editFlags.canCut },
+              { label: nativeText('Copy'), role: 'copy', enabled: params.editFlags.canCopy },
+              { label: nativeText('Paste'), role: 'paste', enabled: params.editFlags.canPaste },
+              { label: nativeText('Select All'), role: 'selectAll', enabled: params.editFlags.canSelectAll }
             )
           } else if (params.selectionText) {
             // Non-editable text selection
             menuItems.push(
-              { label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy }
+              { label: nativeText('Copy'), role: 'copy', enabled: params.editFlags.canCopy }
             )
           }
 
@@ -1678,8 +1682,8 @@ if (!gotTheLock) {
             if (status !== 'granted') {
               log.warn(`spotlight:captureRegion — screen recording permission: ${status}`)
               new Notification({
-                title: 'Screen Recording Permission Required',
-                body: 'Open WebUI needs Screen Recording access to capture screenshots. Please enable it in System Settings → Privacy & Security → Screen Recording, then restart the app.'
+                title: nativeText('Screen Recording Permission Required'),
+                body: nativeText('Open WebUI needs Screen Recording access to capture screenshots. Please enable it in System Settings → Privacy & Security → Screen Recording, then restart the app.')
               }).show()
               // Open the correct System Preferences pane
               shell.openExternal(
@@ -1834,7 +1838,7 @@ if (!gotTheLock) {
       } catch (error: any) {
         log.error('voiceInput:transcribe failed:', error)
         new Notification({
-          title: 'Voice Input Failed',
+          title: nativeText('Voice Input Failed'),
           body: error?.message || 'Transcription failed. Check logs for details.'
         }).show()
         throw error
@@ -1882,7 +1886,7 @@ if (!gotTheLock) {
       log.warn('Voice input error:', message)
       voiceInputRecording = false
       new Notification({
-        title: 'Voice Input Error',
+        title: nativeText('Voice Input Error'),
         body: message || 'An unknown error occurred with voice input.'
       }).show()
     })

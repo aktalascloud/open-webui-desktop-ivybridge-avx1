@@ -18,5 +18,15 @@
     "id": "DESK-004",
     "description": "Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes.",
     "source": "Local source review and Svelte/TypeScript diagnostics."
+  },
+  {
+    "id": "DESK-005",
+    "description": "Build a normal NSIS EXE installer; update Desktop through one EXE feed and install verified optimized WebUI/Terminal forks with runtime staging and owner CODE guards.",
+    "source": "Fork distribution and guarded package provider."
+  },
+  {
+    "id": "DESK-006",
+    "description": "Add complete Russian UI, tray and native context menus, status/error messages; verify locale keys and actual installed onboarding.",
+    "source": "Reviewed Russian translation."
   }
 ]

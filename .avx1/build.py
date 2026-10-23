@@ -35,8 +35,13 @@ def audit_python(wheels, manifest):
     audit=subprocess.run([sys.executable,'-m','pip_audit','--path',str(target),'--strict','--format','json','--output',str(report)],cwd=ROOT)
     if audit.returncode not in {0,1} or not report.exists():raise RuntimeError('Dependency audit unavailable; publication blocked')
     data = json.loads(report.read_text("utf-8"))
-    from security_scope import review
-    assessment=review(data,ROOT)
+    if manifest['project']=='webui':
+        from security_scope import review
+        assessment=review(data,ROOT)
+    else:
+        if any(item.get('vulns') for item in data['dependencies']):
+            raise RuntimeError('Dependency advisory blocks this package')
+        assessment={'status':'passed; no dependency advisories','exceptions':[]}
     write_json(WORK/'security-review.json',assessment)
     manifest["security"] = {"python_audit": "passed with explicit applicability review", "dependencies": len(data["dependencies"]),
                             'assessment':assessment}
@@ -50,6 +55,7 @@ def build_python(project, package, manifest):
     environment = dict(os.environ, CYPRESS_INSTALL_BINARY="0", HUSKY="0", PIP_DISABLE_PIP_VERSION_CHECK="1")
     run(sys.executable, "-m", "pip", "install", "build", "hatchling", "wheel")
     if project == "webui":
+        run("node", "--experimental-strip-types", "--test", ROOT / ".avx1/test_suggestions.mjs", env=environment)
         run("node", "--test", ROOT / ".avx1/frontend_contract.test.mjs", env=environment)
         # The reviewed hatch hook uses npm ci and the checked-in lockfile.
         run(sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", wheels, env=environment)
@@ -69,13 +75,16 @@ def build_python(project, package, manifest):
     def checked_script(script, *arguments):
         # --target installs do not process .pth files through PYTHONPATH alone.
         # pywin32 uses one to register its win32 paths and DLL directory.
-        launcher = "import runpy,site,sys;site.addsitedir(sys.argv[1]);sys.argv=sys.argv[2:];runpy.run_path(sys.argv[0],run_name='__main__')"
+        launcher = "import runpy,site,sys;from pathlib import Path;site.addsitedir(sys.argv[1]);sys.argv=sys.argv[2:];sys.path.insert(0,str(Path(sys.argv[0]).resolve().parent));runpy.run_path(sys.argv[0],run_name='__main__')"
         run(sys.executable, "-c", launcher, audit_target, script, *arguments)
     if project == "terminal":
         checked_script(ROOT / ".avx1/test_terminal.py")
     else:
         checked_script(ROOT / ".avx1/test_mcp_compat.py", "--source", ROOT / "backend/open_webui")
         checked_script(ROOT / ".avx1/bench_json.py")
+        checked_script(ROOT / ".avx1/test_brotli.py")
+        checked_script(ROOT / ".avx1/test_frontend_browser.py")
+        manifest['security']['browser_smoke']='Chromium rendered the packaged login form without JavaScript page errors'
     bootstrap = package / "bootstrap"
     bootstrap.mkdir()
     run(sys.executable, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "pip", "--dest", bootstrap)
@@ -94,9 +103,27 @@ def build_desktop(package, manifest):
     run("npm", "ci", "--no-audit", "--no-fund", env=environment)
     run("npm", "audit", "--omit=dev", "--audit-level=high", env=environment)
     run("npm", "run", "build", env=environment)
-    run("npx", "--no-install", "electron-builder", "--win", "--x64", "--dir", "--publish", "never",
-        "-c.win.signAndEditExecutable=false", env=environment)
+    original=json.loads((ROOT/'package.json').read_text('utf-8'))['version']
+    major,minor,patch=original.split('-')[0].split('.')
+    version=f"{major}.{minor}.{int(patch)+1}-avx1.{manifest['day']}.{os.environ.get('GITHUB_RUN_NUMBER','1')}"
+    manifest['desktop_version']=version
+    run("npx", "--no-install", "electron-builder", "--win", "nsis", "--x64", "--publish", "never",
+        "-c.win.signAndEditExecutable=false",'-c.extraMetadata.version='+version, env=environment)
     shutil.copytree(ROOT / "dist/win-unpacked", package / "desktop", ignore=shutil.ignore_patterns("*.pdb", "*.map"))
+    installers=list((ROOT/'dist').glob('*-setup.exe'))
+    if len(installers)!=1:raise RuntimeError('Exactly one NSIS installer is required')
+    installer_dir=package/'installer';installer_dir.mkdir()
+    shutil.copy2(installers[0],installer_dir/'Open-WebUI-AVX1-Setup.exe')
+    smoke=WORK/'nsis-smoke-install'
+    run(installers[0],'/S','/D='+str(smoke))
+    if not (smoke/'open-webui.exe').is_file():raise RuntimeError('NSIS installation failed')
+    for relative in ('resources/app.asar','resources/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node'):
+        if sha256(smoke/relative)!=sha256(package/'desktop'/relative):raise RuntimeError('Installed NSIS content differs from the qualified app')
+    test_tools=WORK/'test-tools'
+    run('npm','install','--prefix',test_tools,'--ignore-scripts','--no-package-lock','--no-save','playwright@1.58.2')
+    ui_environment=dict(os.environ,TEST_PLAYWRIGHT=str(test_tools/'node_modules/playwright'),EXPECTED_DESKTOP_VERSION=version)
+    run('node',ROOT/'.avx1/test_desktop_ui.cjs',smoke/'open-webui.exe',WORK/'desktop-test-profile',env=ui_environment)
+    manifest['installer_test']='NSIS installed in an isolated directory; app/PTY digests matched; Russian onboarding rendered without page errors'
     manifest["security"] = {"npm_runtime_audit": "passed; high/critical gate"}
     manifest["optimization_scope"] = "node-pty rebuilt with MSVC O2/GL/LTCG/AVX; Electron/Chromium use upstream prebuilt engines"
     manifest["authenticode"] = "Unsigned community build"
@@ -138,7 +165,7 @@ def build_conduit(package, manifest, channel):
     key.write_bytes(base64.b64decode(os.environ["CONDUIT_KEYSTORE_BASE64"], validate=True))
     properties.write_text(f"storeFile={key.as_posix()}\nstorePassword={password}\nkeyPassword={password}\nkeyAlias=conduit\n", encoding="utf-8")
     android = toolchains["android"]
-    environment = dict(os.environ, ORG_GRADLE_PROJECT_avx1Channel=channel,
+    environment = dict(os.environ,
                        ORG_GRADLE_PROJECT_avx1ApiLevel=str(android["api_level"]),
                        ORG_GRADLE_PROJECT_avx1MinorApiLevel=str(android["minor_api_level"]))
     manifest["android_sdk"] = android
@@ -165,22 +192,23 @@ def build_conduit(package, manifest, channel):
     manifest["optimization_scope"] = "Flutter release AOT, ARM64 only, icon tree shaking, R8 minification/resource shrinking, Dart obfuscation"
     manifest["security"] = {"flutter_tests": "passed", "apk_signature": "verified",
                             "dependency_review": "outdated report; not a complete vulnerability audit"}
-    manifest["application_id"] = "io.github.aktalascloud.conduit" + (".dev" if channel == "development" else "")
+    manifest["application_id"] = "io.github.aktalascloud.conduit"
     manifest["device_performance"] = "Not measured on a physical Android device"
 
 
 def main():
     project = json.loads((ROOT / ".avx1/project.json").read_text("utf-8"))
-    channel = os.environ.get("BUILD_CHANNEL", "development")
+    channel = os.environ.get("BUILD_CHANNEL", "latest")
     day = os.environ.get("BUILD_DAY") or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-    if channel not in {"stable", "development"} or not re.fullmatch(r"\d{8}", day):
+    if channel != "latest" or not re.fullmatch(r"\d{8}", day):
         raise ValueError("Invalid build channel/date")
     if WORK.exists() or OUT.exists():
         raise RuntimeError("Use a fresh checkout for each build")
     WORK.mkdir()
     OUT.mkdir()
     run(sys.executable, ROOT / '.avx1/test_public_gate.py')
-    run(sys.executable, ROOT / '.avx1/test_security_scope.py')
+    run(sys.executable, ROOT / '.avx1/test_locales.py')
+    if project['id']=='webui':run(sys.executable, ROOT / '.avx1/test_security_scope.py')
     package = WORK / "package"
     package.mkdir()
     manifest = {"schema": 1, "project": project["id"], "upstream": project["upstream"],
@@ -190,7 +218,9 @@ def main():
                 "built_utc": dt.datetime.now(dt.timezone.utc).isoformat(), "llm_weights_included": False,
                 "llm_speedup_percent": None}
     license_files(package / "licenses")
-    for name in ("Install.cmd", "Install.ps1", "bench_json.py"):
+    helper_files=(['Install.cmd','Install.ps1'] if project['id'] in ('webui','terminal') else [])
+    if project['id']=='webui':helper_files.append('bench_json.py')
+    for name in helper_files:
         shutil.copy2(ROOT / ".avx1" / name, package / name)
     if project["id"] in {"webui", "terminal"}:
         build_python(project["id"], package, manifest)

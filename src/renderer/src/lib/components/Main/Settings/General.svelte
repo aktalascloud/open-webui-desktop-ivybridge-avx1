@@ -17,7 +17,7 @@
 
   // Language state
   let languages = $state<{ code: string; title: string }[]>([])
-  let selectedLanguage = $state('en-US')
+  let selectedLanguage = $state('ru-RU')
 
   onMount(async () => {
     launchAtLogin = await window.electronAPI.getLaunchAtLogin()
@@ -34,7 +34,7 @@
 
     // Load languages
     languages = await getLanguages()
-    selectedLanguage = cfg?.language ?? localStorage.getItem('locale') ?? 'en-US'
+    selectedLanguage = cfg?.language ?? localStorage.getItem('locale') ?? 'ru-RU'
   })
 
   const applyThemeClass = (t: string) => {

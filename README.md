@@ -2,33 +2,23 @@
 
 [English](README.md) · [Русский](README.ru.md)
 
-Experimental builds for personal compatibility and performance testing. Upstream application names and interface branding are retained.
+One current build combines fresh official source and reviewed fork patches. Extended Russian translation covers the interface, tray and native context menus.
 
-[Upstream project](https://github.com/open-webui/desktop) · [Packages](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases)
+Download and run the **EXE installer** from the latest release. Choose an installation directory or install over the existing version. Profiles, data and models remain separate from application files. Desktop and backend installation use this owner's verified forks.
 
-Extract the appropriate archive and run `Install.cmd`. `Install.cmd -CheckOnly` verifies integrity without installing. Packages exclude personal configuration, credentials, history, caches and model weights. Models download from Hugging Face on demand.
+[Upstream](https://github.com/open-webui/desktop) · [Releases](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases)
 
 ## Patches
 
-| ID | Change | Source |
-|---|---|---|
-| DESK-001 | Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity. | `.avx1/PATCHES.json` |
-| DESK-002 | Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine. | `.avx1/PATCHES.json` |
-| DESK-003 | Security-maintained Electron 45; modern Svelte type resolution; explicit managed backend reuse; no credential-bearing config/command logs; uv targets the selected Python. | `.avx1/PATCHES.json` |
-| DESK-004 | Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes. | `.avx1/PATCHES.json` |
-
-## Measurements
-
-| Metric | Verified improvement |
+| ID | Change |
 |---|---|
-| LLM generation throughput | Not measured |
-| JSON on Ivy Bridge | Pending stock/optimized comparison |
-| Android runtime performance | Not measured on a physical phone |
+| DESK-001 | Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity. |
+| DESK-002 | Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine. |
+| DESK-003 | Security-maintained Electron 45; modern Svelte type resolution; explicit managed backend reuse; no credential-bearing config/command logs; uv targets the selected Python. |
+| DESK-004 | Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes. |
+| DESK-005 | Build a normal NSIS EXE installer; update Desktop through one EXE feed and install verified optimized WebUI/Terminal forks with runtime staging and owner CODE guards. |
+| DESK-006 | Add complete Russian UI, tray and native context menus, status/error messages; verify locale keys and actual installed onboarding. |
 
-Unmeasured changes have no claimed percentage. JSON timings cover serialization/parsing, not tokens/s. LTO and ISA flags apply only to the named native components; they do not turn Python or TypeScript into native code. AVX2/FMA and fast-math are not enabled.
+No percentage gain is claimed for GUI or LLM speed. Native terminal functionality is qualified on the actual Xeon E5-2697 v2. PGO is disabled; Electron/Python retain vendor builds.
 
-## Licensing and compatibility
-
-Original licenses, notices and license history are preserved. Each binary package includes its corresponding source. Private signing keys stay outside the repository. APKs use a separate application ID.
-
-Local deployment additionally checks the owner's private filter and Telegram bridge. Their source, settings and data are not published. Unreviewed PR/fork changes remain candidates; accepted upstream fixes arrive through merges of official branches.
+Original licenses and notices are preserved; exact corresponding source is available at each release tag. Private filter/bridge code, settings, logs and model weights are excluded.

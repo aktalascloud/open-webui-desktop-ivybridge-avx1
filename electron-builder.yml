@@ -11,6 +11,10 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 extraResources:
+  - from: .avx1/toolchains.json
+    to: avx1-toolchains.json
+  - from: .avx1/fork_backend.py
+    to: fork_backend.py
   - from: CHANGELOG.md
     to: CHANGELOG.md
 asarUnpack:
@@ -19,6 +23,11 @@ asarUnpack:
 win:
   executableName: open-webui
 nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  runAfterFinish: false
   artifactName: ${name}-${arch}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}

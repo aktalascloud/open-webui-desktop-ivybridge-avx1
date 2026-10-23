@@ -11,6 +11,11 @@ const send = (type: string, data?: any): void => {
 export function initUpdater(window: BrowserWindow): void {
   mainWin = window
 
+  autoUpdater.setFeedURL({ provider: 'generic', url: 'https://raw.githubusercontent.com/aktalascloud/open-webui-desktop-ivybridge-avx1/avx1/.avx1/update/' })
+  autoUpdater.channel = 'latest'
+  autoUpdater.allowDowngrade = false
+  autoUpdater.allowPrerelease = true
+  autoUpdater.disableDifferentialDownload = true
   autoUpdater.logger = log
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true

@@ -106,7 +106,7 @@ export const startOpenTerminal = async (
   const cwd = config.openTerminal?.cwd || require('os').homedir()
 
   const commandArgs = [
-    '-m', 'uv', 'run', 'open-terminal', 'run',
+    '-c', 'from open_terminal.cli import main; main()', 'run',
     '--host', host,
     '--port', availablePort.toString(),
     '--api-key', generatedKey,

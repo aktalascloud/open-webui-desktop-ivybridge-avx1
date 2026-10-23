@@ -1,0 +1,14 @@
+{
+  "app.name": "Open WebUI",
+  "app.desktop": "Open WebUI Desktop",
+  "main.openWebUI": "Open WebUI",
+  "main.getStarted.openTerminal": "Open Terminal",
+  "main.getStarted.llamaCpp": "llama.cpp",
+  "sidebar.openTerminal": "Open Terminal",
+  "sidebar.llamaCpp": "llama.cpp",
+  "sidebar.github": "GitHub",
+  "statusBar.server": "Open WebUI",
+  "settings.tabs.openwebui": "Open WebUI",
+  "settings.tabs.terminal": "Open Terminal",
+  "settings.inference.llamaServer": "llama-server"
+}

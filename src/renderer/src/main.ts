@@ -5,10 +5,9 @@ import { initI18n } from './lib/i18n'
 
 import App from './App.svelte'
 
-initI18n()
-
-const app = mount(App, {
-  target: document.getElementById('app')!
-})
-
-export default app
+const start = async () => {
+  const config = await window.electronAPI.getConfig().catch(() => ({}))
+  initI18n(config?.language || 'ru-RU')
+  mount(App, { target: document.getElementById('app')! })
+}
+start()

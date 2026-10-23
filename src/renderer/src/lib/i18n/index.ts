@@ -48,6 +48,7 @@ export const initI18n = (defaultLocale?: string | undefined) => {
     .use(LanguageDetector)
     .init({
       debug: false,
+      lng: defaultLocale,
       detection: {
         order: detectionOrder,
         caches: ['localStorage'],

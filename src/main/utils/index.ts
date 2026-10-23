@@ -167,7 +167,10 @@ const getArchString = () => {
   return archMap[os.arch()] || 'x86_64'
 }
 
+const pythonBuildPin = () => JSON.parse(fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'avx1-toolchains.json') : path.join(app.getAppPath(), '.avx1/toolchains.json'), 'utf8')).python
+
 const generateDownloadUrl = () => {
+  if (os.platform() === 'win32' && os.arch() === 'x64') return pythonBuildPin().url
   const baseUrl = 'https://github.com/astral-sh/python-build-standalone/releases/download'
   const releaseDate = '20260310'
   const pythonVersion = '3.12.13'
@@ -264,6 +267,8 @@ const checkInternet = async () => {
 
 export const installPython = async (installationDir?: string, onStatus?: (status: string) => void): Promise<boolean> => {
   const pythonDownloadPath = getPythonDownloadPath()
+  const runtimePin = process.platform === 'win32' && process.arch === 'x64' ? pythonBuildPin() : null
+  if (runtimePin && fs.existsSync(pythonDownloadPath) && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) fs.unlinkSync(pythonDownloadPath)
   if (!fs.existsSync(pythonDownloadPath)) {
     if (!(await checkInternet())) {
       throw new Error(
@@ -286,6 +291,7 @@ export const installPython = async (installationDir?: string, onStatus?: (status
     return false
   }
 
+  if (runtimePin && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) throw new Error('Контрольная сумма Python не совпала. Установка отменена.')
   installationDir = installationDir || getPythonInstallationDir()
   log.info(installationDir, pythonDownloadPath)
 
@@ -411,6 +417,7 @@ export const isUvInstalled = (installationDir?: string) => {
 }
 
 export const uninstallPython = (installationDir?: string): boolean => {
+  if (runtimePin && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) throw new Error('Контрольная сумма Python не совпала. Установка отменена.')
   installationDir = installationDir || getPythonInstallationDir()
   if (!fs.existsSync(installationDir)) {
     log.error('Python installation not found')
@@ -435,7 +442,38 @@ export const uninstallPython = (installationDir?: string): boolean => {
 
 // ─── Package Management ─────────────────────────────────
 
+const installForkPackage = async (packageName: string, version?: string, onStatus?: (status: string) => void): Promise<boolean> => {
+  const project = packageName === 'open-webui' ? 'webui' : 'terminal'
+  const config = await getConfig()
+  const root = getInstallDir()
+  let interpreter = getPythonPath()
+  let script = app.isPackaged ? path.join(process.resourcesPath, 'fork_backend.py') : path.join(app.getAppPath(), '.avx1/fork_backend.py')
+  let argumentsList = ['-I', script, '--project', project, '--python', interpreter]
+  if (config.localServer?.managedBackend === true) {
+    script = path.join(root, 'maintenance/scripts/desktop_backend_update.py')
+    const receipt = path.join(root, 'maintenance/state/self-test.json')
+    if (!fs.existsSync(script) || !fs.existsSync(receipt)) throw new Error('Не найден контроллер управляемого backend. Используйте штатный запуск проекта.')
+    interpreter = JSON.parse(fs.readFileSync(receipt, 'utf8')).python
+    if (typeof interpreter !== 'string' || !fs.existsSync(interpreter)) throw new Error('Не найдена независимая среда контроллера обновлений.')
+    argumentsList = ['-X', 'utf8', '-B', script, '--project', project]
+  } else {
+    await stopAllServers()
+  }
+  if (version) argumentsList.push('--tag', version)
+  onStatus?.('Установка проверенной оптимизированной сборки форка…')
+  return new Promise((resolve, reject) => {
+    const child = execFile(interpreter, argumentsList, { env: pythonEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
+    let lastLine = ''
+    const status = (data: Buffer) => { const line = data.toString().trim(); if (line) { lastLine = line.split('\n').at(-1) || line; onStatus?.(lastLine) } }
+    child.stdout?.on('data', status)
+    child.stderr?.on('data', status)
+    child.on('error', reject)
+    child.on('exit', (code) => code === 0 ? resolve(true) : reject(new Error(lastLine || 'Не удалось установить сборку форка. Рабочая версия сохранена.')))
+  })
+}
+
 export const installPackage = (packageName: string, version?: string, onStatus?: (status: string) => void): Promise<boolean> => {
+  if (packageName === 'open-webui' || packageName === 'open-terminal') return installForkPackage(packageName, version, onStatus)
   return new Promise((resolve, reject) => {
     if (!isPythonInstalled()) {
       return reject(new Error('Python is not installed. Please reinstall the app or run setup again.'))
@@ -576,7 +614,7 @@ export const startServer = async (
     throw new Error(`Python executable not found at: ${pythonPath}`)
   }
 
-  const commandArgs = ['-m', 'uv', 'run', 'open-webui', 'serve', '--host', host]
+  const commandArgs = ['-c', 'from open_webui import app; app()', 'serve', '--host', host]
   const dataDir = getOpenWebUIDataPath()
   const secretKey = getSecretKey()
   if (!fs.existsSync(dataDir)) {
@@ -811,6 +849,7 @@ export interface Connection {
 }
 
 export interface AppConfig {
+  language: string
   version: number
   defaultConnectionId: string | null
   connections: Connection[]
@@ -850,6 +889,7 @@ export interface AppConfig {
 }
 
 const DEFAULT_CONFIG: AppConfig = {
+  language: 'ru-RU',
   version: 1,
   defaultConnectionId: null,
   connections: [],
