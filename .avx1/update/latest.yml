@@ -1,8 +1,8 @@
-version: 0.0.21-avx1.20261024.11
+version: 0.0.21-avx1.20261024.12
 files:
-  - url: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261024-cd95c8d2/Open-WebUI-AVX1-Setup.exe
-    sha512: NEOmKU//ZpRmHiyLm+I8MJisJSSt5ncZdHQf/vyrEf8hZbJOXmnAstuD19a15cXbNRFn2hb3awERBM9vz8lyVQ==
-    size: 122899855
-path: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261024-cd95c8d2/Open-WebUI-AVX1-Setup.exe
-sha512: NEOmKU//ZpRmHiyLm+I8MJisJSSt5ncZdHQf/vyrEf8hZbJOXmnAstuD19a15cXbNRFn2hb3awERBM9vz8lyVQ==
-releaseDate: "2026-10-24T01:08:10.608511+00:00"
+  - url: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261024-486977dc/Open-WebUI-AVX1-Setup.exe
+    sha512: 19Ncwxbaa5feO8YUJe6jd/AUHMirEgWNr41w+NFk419KWnSHEDn4b3trJCfjWeVbceVlu5bNohzy/l6dJDJP1Q==
+    size: 122900750
+path: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261024-486977dc/Open-WebUI-AVX1-Setup.exe
+sha512: 19Ncwxbaa5feO8YUJe6jd/AUHMirEgWNr41w+NFk419KWnSHEDn4b3trJCfjWeVbceVlu5bNohzy/l6dJDJP1Q==
+releaseDate: "2026-10-24T02:23:29.652358+00:00"
