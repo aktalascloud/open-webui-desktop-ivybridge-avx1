@@ -9,5 +9,5 @@
   "channel": "latest",
   "upstream_commit": "0931b46d66e06bfb7d0b6a4aa065e6db338a1000",
   "stable_tag": "v0.0.20",
-  "distribution": "single NSIS EXE installer"
+  "distribution": "single unified latest"
 }
