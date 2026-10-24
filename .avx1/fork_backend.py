@@ -62,6 +62,20 @@ def fetch_candidate(project,cache,tag=None):
     if not archive.exists() or digest(archive)!=expected.split(':')[1]:download(asset['browser_download_url'],archive,expected.split(':')[1])
     return archive,validate_bundle(archive,project,release['target_commitish'])
 
+def companion_terminal(project,old_site,stage,manifest):
+    if project!='webui' or not (old_site/'open_terminal').is_dir():return None
+    archive,paired=fetch_candidate('terminal',stage/'paired-download')
+    def versions(value):return {x['name'].lower().replace('_','-'):x['version'] for x in value['resolved_dependencies']}
+    primary_versions,paired_versions=versions(manifest),versions(paired)
+    for name in ('fastapi','pydantic','uvicorn'):
+        if name in primary_versions and name in paired_versions and primary_versions[name]!=paired_versions[name]:
+            raise RuntimeError('Нужен согласованный релиз Terminal для общей среды Python; рабочая версия сохранена ('+name+').')
+    folder=stage/'paired-terminal';folder.mkdir()
+    with zipfile.ZipFile(archive) as bundle:bundle.extractall(folder)
+    wheels=list((folder/'wheels').glob('open_terminal-*.whl'))
+    if len(wheels)!=1:raise RuntimeError('В согласованном пакете нет однозначного Terminal wheel')
+    return wheels[0],paired
+
 def install(project,python,archive,manifest):
     python=Path(python).resolve();runtime=python.parent;root=runtime.parent
     if python.name.lower()!='python.exe' or runtime.name.lower()!='python' or not python.is_file():raise RuntimeError('Неизвестная папка Python; установка отменена')
@@ -93,6 +107,7 @@ def install(project,python,archive,manifest):
                 (name in {app,'pip','setuptools','pkg_resources','_distutils_hack','distutils-precedence.pth'} or
                  name.startswith((app+'-', 'pip-', 'setuptools-')) and name.endswith('.dist-info')))]
         old_site=runtime/'Lib/site-packages'
+        companion=companion_terminal(project,old_site,stage,manifest)
         if old_site.exists():shutil.copytree(old_site,site,dirs_exist_ok=True,ignore=ignore)
         if (runtime/'Scripts').exists():shutil.copytree(runtime/'Scripts',stage/'python/Scripts',dirs_exist_ok=True)
         bootstrap=list((package/'bootstrap').glob('pip-*.whl'))
@@ -101,6 +116,7 @@ def install(project,python,archive,manifest):
         constraints=stage/'constraints.txt'
         constraints.write_text(''.join(x['name']+'=='+x['version']+'\n' for x in manifest['resolved_dependencies']),encoding='utf-8')
         wheels=list((package/'wheels').glob('*.whl'))
+        if companion:wheels.append(companion[0])
         if manifest.get('native_json',{}).get('default')=='stock':wheels=[p for p in wheels if not p.name.startswith('orjson-')]
         print('Установка оптимизированного пакета и проверенных зависимостей…',flush=True)
         environment={key:value for key,value in os.environ.items() if key not in ('PYTHONHOME','PYTHONPATH')}
@@ -109,11 +125,16 @@ def install(project,python,archive,manifest):
         check="import importlib.metadata as m; import uv; assert m.version('open-webui'); import mcp; import orjson" if project=='webui' else "import importlib.metadata as m; import uv; assert m.version('open-terminal'); import open_terminal.cli"
         subprocess.run([str(new_python),'-I','-c',check],check=True)
         subprocess.run([str(new_python),'-I','-m','uv','--version'],check=True)
+        launcher="from pip._vendor.distlib.scripts import ScriptMaker;import sys,importlib.util;m=ScriptMaker(None,sys.argv[1]);m.executable=sys.argv[2];m.clobber=True;m.variants={''};[(m.make(spec)) for name,spec in [('open_webui','open-webui = open_webui:app'),('open_terminal','open-terminal = open_terminal.cli:main')] if importlib.util.find_spec(name)]"
+        subprocess.run([str(new_python),'-I','-c',launcher,str(stage/'python/Scripts'),str(python)],check=True,env=environment)
         moved=False;promoted=False
         try:
             runtime.rename(previous/'python');moved=True
             (stage/'python').rename(runtime);promoted=True
             receipts[project]={'source_commit':manifest['source_commit'],'upstream_commit':manifest['upstream_commit'],'backup':str(previous)}
+            if companion:
+                paired=companion[1]
+                receipts['terminal']={'source_commit':paired['source_commit'],'upstream_commit':paired['upstream_commit'],'backup':str(previous),'installed_with_webui':manifest['source_commit']}
             temporary=receipt_path.with_suffix('.tmp');temporary.write_text(json.dumps(receipts,indent=2),encoding='utf-8');temporary.replace(receipt_path)
         except Exception:
             if promoted and runtime.exists():runtime.rename(stage/'failed-python')
