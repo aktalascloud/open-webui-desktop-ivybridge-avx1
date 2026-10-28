@@ -1,5 +1,7 @@
 # Open WebUI Desktop · Ivy Bridge AVX1
 
+Runtime: Electron 45.1.0; native PTY rebuilt for the pinned runtime. Electron/Chromium are upstream prebuilt engines.
+
 [English](README.md) · [Русский](README.ru.md) · [Upstream](https://github.com/open-webui/desktop) · [Releases](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest)
 
 Windows installer with extended Russian interface, dialogs and context menus.

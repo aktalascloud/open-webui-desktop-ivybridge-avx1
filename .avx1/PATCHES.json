@@ -28,5 +28,10 @@
     "id": "DESK-006",
     "description": "Add complete Russian UI, tray and native context menus, status/error messages; verify locale keys and actual installed onboarding.",
     "source": "Reviewed Russian translation."
+  },
+  {
+    "id": "DESK-007",
+    "description": "Pin stable Electron45.1.0 and rebuild the native PTY for its headers; preserve independent optimized backend, Russian UI and existing profile.",
+    "source": "Official Electron runtime release; upstream prebuilt Chromium/Electron engines, local MSVC O2/AVX/GL/LTCG PTY build. No engine speedup percentage claimed."
   }
 ]

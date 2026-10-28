@@ -1,5 +1,7 @@
 # Open WebUI Desktop · Ivy Bridge AVX1
 
+Среда выполнения: Electron 45.1.0; нативный PTY пересобран под закреплённую версию. Electron/Chromium — готовые сборки upstream.
+
 [English](README.md) · [Русский](README.ru.md) · [Исходный проект](https://github.com/open-webui/desktop) · [Релизы](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest)
 
 Установщик Windows с дополненным русским интерфейсом, диалогами и контекстными меню.
