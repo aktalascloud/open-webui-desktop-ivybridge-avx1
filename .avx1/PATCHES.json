@@ -42,5 +42,13 @@
     ],
     "source": "Reviewed immutable head8018ba3fe61fe869c2a40ded9dd84718d120f619; adapted relay and origin/TLS checks only. Embedded model/runtime/downloader changes are outside this port.",
     "verification": "Node trust-boundary checks and real packaged Electron/NSIS gates; no new credentials or external services."
+  },
+  {
+    "id": "DESK-009",
+    "description": "PR269 event-delivery hardening: allowlist outbound guest events; Terminal bearer credentials and local inference endpoints reach only the owned local loopback webview. Recheck its origin when queued dom-ready delivery runs; never broadcast private status/error payloads to remote pages. User-targeted queries/calls and safe theme/model-refresh events retain their routing.",
+    "urls": [
+      "https://github.com/open-webui/desktop/pull/269"
+    ],
+    "source": "Own shared-relay adaptation after tracing every main-process event caller; actual sender function and redirect-race fixture."
   }
 ]

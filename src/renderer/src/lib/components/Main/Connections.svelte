@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isGuestPushType, canRelayDesktopEvent } from '../../guest-protocol'
   import { onMount } from 'svelte'
   import { fade } from 'svelte/transition'
   import { connections, config, serverInfo } from '../../stores'
@@ -324,27 +325,29 @@
 
   // ── Webview event delivery ─────────────────────────────
   // Single path: all events from the main process flow through here.
-  // Query events target a specific webview; everything else broadcasts.
+  // User queries are targeted; local credentials stay in the owned local view.
   const sendToWebview = (event: any, connId?: string) => {
+    if (!isGuestPushType(event?.type)) return
+    if ((event.type === 'query' || event.type === 'call') && !connId) return
     const container = document.querySelector('.content-webview-container')
     if (!container) return
-
     const webviews = connId
       ? [container.querySelector(`webview[partition="persist:connection-${connId}"]`) as any].filter(Boolean)
       : Array.from(container.querySelectorAll('webview'))
-
-    for (const wv of webviews) {
-      try {
-        // Attempt to send — throws if webview hasn't fired dom-ready yet
+    for (const wv of webviews as any[]) {
+      const localOnly = event.type === 'connections:terminal' || event.type === 'connections:openai'
+      if (localOnly && wv.getAttribute('partition') !== 'persist:connection-local') continue
+      const deliver = () => {
+        if (!canRelayDesktopEvent(event.type, wv.getURL(), localConn?.url, !!connId)) return false
         wv.send('desktop:event', event)
-      } catch {
-        // Webview not ready — queue delivery until dom-ready
-        const onReady = () => {
-          wv.removeEventListener('dom-ready', onReady)
-          try { wv.send('desktop:event', event) } catch (_) {}
-        }
-        wv.addEventListener('dom-ready', onReady)
+        return true
       }
+      try { if (deliver()) continue } catch { /* Wait for the owned view. */ }
+      const onReady = () => {
+        wv.removeEventListener('dom-ready', onReady)
+        try { deliver() } catch { /* A closed view owns no delivery. */ }
+      }
+      wv.addEventListener('dom-ready', onReady)
     }
   }
 

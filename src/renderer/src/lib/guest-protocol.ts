@@ -23,6 +23,23 @@ export type GuestLoadPage = (typeof GUEST_LOAD_PAGES)[number]
 
 export const GUEST_THEME_EVENTS = ['theme:update'] as const
 
+const GUEST_PUSH_TYPES = ['query','call','theme:update','models:refresh','connections:terminal','connections:openai']
+
+export function isGuestPushType(type: unknown): boolean {
+  return typeof type === 'string' && GUEST_PUSH_TYPES.includes(type)
+}
+
+export function canRelayDesktopEvent(type: string, guestURL: string, localURL: string | undefined, targeted: boolean): boolean {
+  if (type === 'query' || type === 'call') return targeted
+  if (type === 'theme:update' || type === 'models:refresh') return true
+  if (type !== 'connections:terminal' && type !== 'connections:openai') return false
+  try {
+    const local = new URL(localURL ?? '')
+    return ['127.0.0.1','localhost','[::1]'].includes(local.hostname) &&
+      new URL(guestURL).origin === local.origin
+  } catch { return false }
+}
+
 export function isGuestSendType(type: unknown): type is GuestSendType {
   return typeof type === 'string' && (GUEST_SEND_TYPES as readonly string[]).includes(type)
 }
