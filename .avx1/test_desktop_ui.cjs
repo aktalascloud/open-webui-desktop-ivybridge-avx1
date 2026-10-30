@@ -7,6 +7,7 @@ const { _electron } = require(process.env.TEST_PLAYWRIGHT)
   const profile = process.argv[3]
   fs.mkdirSync(profile, { recursive: true })
   const app = await _electron.launch({ executablePath, args: ['--no-sandbox', '--disable-gpu'], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
+  let guestServer
   try {
     await app.firstWindow()
     let page = app.windows()[0]
@@ -28,6 +29,31 @@ const { _electron } = require(process.env.TEST_PLAYWRIGHT)
     await page.screenshot({ path: path.join(profile, 'russian-onboarding.png') })
     assert.deepEqual(errors, [])
     assert.equal(await app.evaluate(({ app }) => app.getVersion()), process.env.EXPECTED_DESKTOP_VERSION)
+    guestServer = require('node:http').createServer((_request, response) => response.end('<!doctype html><title>Untrusted fixture</title>'))
+    await new Promise(resolve => guestServer.listen(0, '127.0.0.1', resolve))
+    const guestId = await page.evaluate(async port => {
+      const guest = document.createElement('webview')
+      guest.id = 'security-guest-fixture'
+      guest.setAttribute('nodeintegration', '')
+      guest.setAttribute('preload', 'file:///untrusted/preload/content-preload.js')
+      guest.setAttribute('src', `http://127.0.0.1:${port}/`)
+      guest.style.cssText = 'width:100px;height:100px'
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(Error('Guest fixture did not load')), 15000)
+        guest.addEventListener('dom-ready', () => { clearTimeout(timer); resolve(guest.getWebContentsId()) }, { once: true })
+        document.body.appendChild(guest)
+      })
+    }, guestServer.address().port)
+    const preferences = await app.evaluate(({ webContents }, id) => {
+      const value = webContents.fromId(id).getLastWebPreferences()
+      return { node: value.nodeIntegration, sandbox: value.sandbox, isolated: value.contextIsolation, preload: value.preload }
+    }, guestId)
+    assert.equal(preferences.node, false)
+    assert.equal(preferences.sandbox, true)
+    assert.equal(preferences.isolated, true)
+    assert.ok(!preferences.preload.includes('untrusted'))
+    await page.evaluate(() => document.getElementById('security-guest-fixture').remove())
+    console.log('PACKAGED_GUEST_TRUST_BOUNDARY_VERIFIED')
     console.log('NSIS_RUSSIAN_ONBOARDING_RENDERED_NO_PAGE_ERRORS')
-  } finally { await app.close() }
+  } finally { await app.close(); if (guestServer) await new Promise(resolve => guestServer.close(resolve)) }
 })().catch(error => { console.error(error); process.exitCode = 1 })
