@@ -59,6 +59,7 @@ const api = {
 
   // App
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  isWindowFocused: () => ipcRenderer.invoke('window:isFocused'),
   getVersion: () => ipcRenderer.invoke('get:version'),
   resetApp: () => ipcRenderer.invoke('app:reset'),
   getDefaultDataPath: () => ipcRenderer.invoke('app:defaultDataPath'),

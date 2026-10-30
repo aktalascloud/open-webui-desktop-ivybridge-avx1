@@ -33,5 +33,14 @@
     "id": "DESK-007",
     "description": "Pin stable Electron45.1.0 and rebuild the native PTY for its headers; preserve independent optimized backend, Russian UI and existing profile.",
     "source": "Official Electron runtime release; upstream prebuilt Chromium/Electron engines, local MSVC O2/AVX/GL/LTCG PTY build. No engine speedup percentage claimed."
+  },
+  {
+    "id": "DESK-008",
+    "description": "Security subset of official PR269: explicit guest-command allowlist, no privileged dynamic API dispatch or config/username relay; exact shipped preload, guest Node disabled and sandbox/context isolation forced. Certificate exceptions and guest clipboard/media permissions restricted to configured connections/loopback. Preserve current Electron45.1.0, native PTY and managed backend.",
+    "urls": [
+      "https://github.com/open-webui/desktop/pull/269"
+    ],
+    "source": "Reviewed immutable head8018ba3fe61fe869c2a40ded9dd84718d120f619; adapted relay and origin/TLS checks only. Embedded model/runtime/downloader changes are outside this port.",
+    "verification": "Node trust-boundary checks and real packaged Electron/NSIS gates; no new credentials or external services."
   }
 ]

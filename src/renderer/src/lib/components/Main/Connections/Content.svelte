@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { handleGuestSend, isGuestSendType, isGuestLoadPage } from '../../../guest-protocol'
   import { fade, fly } from 'svelte/transition'
   import { config, serverInfo, appState } from '../../../stores'
   import i18n from '../../../i18n'
@@ -179,7 +180,7 @@
         // Log guest page console messages for debugging blank-page issues (#124)
         wv.addEventListener('console-message', (event: any) => {
           if (event.level >= 2) { // warnings and errors only
-            console.warn(`[webview:${connId}]`, event.message)
+            console.warn(`[webview:${connId}] guest warning suppressed`)
           }
         })
 
@@ -193,19 +194,21 @@
 
         // Handle IPC messages from the webview guest (Open WebUI → desktop)
         wv.addEventListener('ipc-message', async (event: any) => {
+          // Only the configured connection origin may use its relay.
+          try {
+            const expected = openConnections.get(connId)
+            if (!expected || new URL(wv.getURL()).origin !== new URL(expected).origin) return
+          } catch { return }
+
           if (event.channel === 'webview:send') {
             const requestData = event.args?.[0]
             if (!requestData) return
 
-            // Handle auth token relay from webview
-            if (requestData.type === 'token:update' && requestData.token) {
-              window.electronAPI.setAuthToken?.(requestData.token)
-              return
-            }
+            if (!isGuestSendType(requestData.type)) return
 
             try {
-              const response = await window.electronAPI[requestData.type]?.(requestData)
-              if (requestData._requestId) {
+              const response = await handleGuestSend(requestData, window.electronAPI)
+              if (typeof requestData._requestId === 'string' && requestData._requestId.length <= 64) {
                 wv.send('desktop:response', {
                   _responseId: requestData._requestId,
                   data: response
@@ -216,7 +219,7 @@
             }
           } else if (event.channel === 'webview:load') {
             const page = event.args?.[0]
-            if (page) onSetView(page === 'home' ? 'welcome' : page)
+            if (isGuestLoadPage(page)) onSetView(page === 'home' ? 'welcome' : page)
           } else if (event.channel === 'webview:event') {
             const payload = event.args?.[0]
             if (!payload?.type) return

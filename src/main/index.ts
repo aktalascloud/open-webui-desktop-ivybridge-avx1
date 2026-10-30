@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { secureGuestWebPreferences, isConfiguredConnectionURL, isConfiguredCertificateHost } from './guest-webview'
 
 import {
   app,
@@ -1266,39 +1267,24 @@ if (!gotTheLock) {
       log.info('Running with GPU sandbox disabled (marker file present)')
     }
 
-    // ─── Self-Signed / Untrusted Certificate Support ─
-    // Allow connections to Open WebUI instances that use self-signed or
-    // otherwise untrusted SSL certificates (issue #108). The user
-    // explicitly configures the server URL, so trusting all certs is
-    // acceptable — this matches the behaviour of VS Code, Postman, and
-    // other Electron apps used in enterprise/self-hosted environments.
-    app.on('certificate-error', (event, _webContents, url, error, certificate, callback) => {
-      log.warn(
-        `Certificate error: ${error} for ${url} ` +
-        `(subject: ${certificate.subjectName}, issuer: ${certificate.issuerName})`
-      )
+    // TLS exceptions are confined to saved user connections and loopback.
+    const connectionURLs = () => (CONFIG?.connections ?? []).map((connection) => connection.url).filter((url) => typeof url === 'string')
+    app.on('certificate-error', (event, _webContents, url, _error, _certificate, callback) => {
       event.preventDefault()
-      callback(true)
+      callback(isConfiguredConnectionURL(url, connectionURLs()))
     })
-
-    // Trust all certs on the default session (used by net.fetch() in
-    // validateRemoteUrl / checkUrlAndOpen).
-    session.defaultSession.setCertificateVerifyProc((_request, callback) => {
-      callback(0) // 0 = verified/trusted
-    })
-
-    // Webviews use partitioned sessions (persist:connection-*). Each
-    // new partition's session also needs to trust all certs.
+    const certificatePolicy = (request, callback) => {
+      callback(isConfiguredCertificateHost(request.hostname, connectionURLs()) ? 0 : -3)
+    }
+    session.defaultSession.setCertificateVerifyProc(certificatePolicy)
     app.on('session-created', (newSession) => {
-      newSession.setCertificateVerifyProc((_request, callback) => {
-        callback(0)
-      })
+      newSession.setCertificateVerifyProc(certificatePolicy)
 
       // Grant media / notification permissions for webview partition sessions
       // so that auth flows, media capture, and notifications work correctly.
-      newSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+      newSession.setPermissionRequestHandler((webContents, permission, callback) => {
         const allowed = ['media', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
-        callback(allowed.includes(permission))
+        callback(allowed.includes(permission) && isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs()))
       })
     })
 
@@ -1324,6 +1310,9 @@ if (!gotTheLock) {
     // so that external links open in the user's default browser instead
     // of navigating the webview or spawning a new Electron window (#165).
     app.on('web-contents-created', (_event, contents) => {
+      contents.on('will-attach-webview', (event, preferences, params) => {
+        if (!secureGuestWebPreferences(preferences, params.src, join(__dirname, '../preload/content-preload.js'))) event.preventDefault()
+      })
       contents.on('render-process-gone', (_e, details) => {
         if (details.reason !== 'clean-exit') {
           log.error(
@@ -1425,6 +1414,7 @@ if (!gotTheLock) {
       gpuSandboxDisabled
     }))
 
+    ipcMain.handle('window:isFocused', () => ({ isFocused: mainWindow?.isFocused() ?? false }))
     ipcMain.handle('app:contentPreloadPath', () => {
       return `file://${join(__dirname, '../preload/content-preload.js')}`
     })
