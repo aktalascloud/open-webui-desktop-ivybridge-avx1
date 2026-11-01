@@ -1,5 +1,5 @@
-import { OutputBuffer } from '../process/outputBuffer'
 // @ts-nocheck
+import { OutputBuffer } from '../process/outputBuffer'
 
 import * as fs from 'fs'
 import * as os from 'os'
