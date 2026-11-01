@@ -1,21 +1,22 @@
-# Open WebUI Desktop · Ivy Bridge AVX1
+# Open WebUI Desktop AVX1
 
-Среда выполнения: Electron 45.1.0; нативный PTY пересобран под закреплённую версию. Electron/Chromium — готовые сборки upstream.
+Неофициальный форк: проверенные исправления для агентов/MCP и дополненный русский интерфейс. Один актуальный NSIS EXE.
 
-[English](README.md) · [Русский](README.ru.md) · [Исходный проект](https://github.com/open-webui/desktop) · [Релизы](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest)
+[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
 
-Установщик Windows с дополненным русским интерфейсом, диалогами и контекстными меню.
+## Сборка
 
-Запустите последний EXE-установщик. Он использует оптимизированный форк WebUI и сохраняет профиль.
+Нужны Python3.12+, Git и GitHub CLI для CI. Сборка не зависит от модели, её весов или Codex.
 
-## Изменения
+```cmd
+Build.cmd status
+Build.cmd build
+```
 
-- Независимый backend и проверяемые обновления из форков.
-- Совместимые пакеты WebUI/Terminal подготавливаются вместе.
-- `node-pty`: MSVC `/O2 /GL /arch:AVX` и `/LTCG`. [Все патчи](.avx1/PATCHES.json).
+`build` проверяет чистоту опубликованного коммита и запускает закреплённый workflow. При готовом локальном компиляторе/SDK: `Build.cmd local`. Зависимости, флаги, тесты и проверки лицензий — в `.avx1/`. Lockfiles и история исходников сохранены. Ключи подписи в репозиторий не входят.
 
-## Проверки и замеры
+## Установка и проверки
 
-Запуск нативного терминала проверен на Xeon E5-2697 v2. Проценты ускорения GUI/LLM не измерялись. Electron и Python используют сборки поставщиков; PGO отключён.
+Используйте единственный пакет релиза. Пользовательские данные храните отдельно от исходников. Адреса серверов и выбор моделей задаются настройками, а не требованиями сборки. Ivy Bridge: AVX/F16C, O3 и проверенный LTO, без AVX2/FMA/PGO/fast-math. Android: ARM64 release AOT; происхождение нативных библиотек указано в манифесте.
 
-Оригинальные лицензии, уведомления и история исходников сохранены. Точные исходники указаны в релизе. Ключи, логи, модели LLM и закрытый код фильтра/бриджа в публичные пакеты не входят.
+Последние проверки и замеры: [.avx1/measurements/latest.json](.avx1/measurements/latest.json). Микрозамеры CPU не означают скорость LLM. Исходные лицензии и уведомления сохранены.

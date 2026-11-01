@@ -207,6 +207,7 @@ def main():
         raise RuntimeError("Use a fresh checkout for each build")
     WORK.mkdir()
     OUT.mkdir()
+    run('node','--experimental-strip-types','--test',ROOT/'.avx1/output-buffer.test.mjs')
     run(sys.executable, ROOT / '.avx1/test_public_gate.py')
     run(sys.executable, ROOT / '.avx1/test_locales.py')
     if project['id']=='webui':run(sys.executable, ROOT / '.avx1/test_security_scope.py')

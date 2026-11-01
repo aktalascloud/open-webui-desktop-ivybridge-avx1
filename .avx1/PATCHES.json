@@ -50,5 +50,13 @@
       "https://github.com/open-webui/desktop/pull/269"
     ],
     "source": "Own shared-relay adaptation after tracing every main-process event caller; actual sender function and redirect-race fixture."
+  },
+  {
+    "id": "DESK-010",
+    "description": "Backport upstream bounded UTF8 output buffer; retain Terminal and voice features removed by upstream0.1 redesign. Memory bound covers a single huge chunk; no new inference-speed claim.",
+    "urls": [
+      "https://github.com/open-webui/desktop/commit/877700e9969d51b1b06c42387cf9d5d94f5c9090"
+    ],
+    "verification": "Targeted regressions plus exact-source package/privacy/security/startup gates; final CI receipt records actual scope."
   }
 ]

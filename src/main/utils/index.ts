@@ -1,3 +1,4 @@
+import { OutputBuffer } from '../process/outputBuffer'
 // @ts-nocheck
 
 import * as fs from 'fs'
@@ -592,7 +593,7 @@ export const uninstallPackage = (packageName: string): boolean => {
 import * as pty from 'node-pty'
 
 const serverPIDs: Set<number> = new Set()
-const serverLogs: Map<number, string[]> = new Map()
+const serverLogs: Map<number, OutputBuffer> = new Map()
 let serverPtyProcesses: Map<number, pty.IPty> = new Map()
 
 export const getServerPIDs = (): number[] => Array.from(serverPIDs)
@@ -655,19 +656,19 @@ export const startServer = async (
   }
 
   const pid = ptyProcess.pid
-  const rawBuffer: string[] = []
+  const rawBuffer = new OutputBuffer()
   serverPIDs.add(pid)
   serverLogs.set(pid, rawBuffer)
   serverPtyProcesses.set(pid, ptyProcess)
 
   ptyProcess.onData((data: string) => {
-    rawBuffer.push(data)
+    rawBuffer.append(data)
     serverLogger.info(`[PID:${pid}] ${data.replace(/[\r\n]+/g, ' ').trim()}`)
   })
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     const exitMsg = `\r\n[Process exited with code ${exitCode}${signal ? ` signal ${signal}` : ''}]\r\n`
-    rawBuffer.push(exitMsg)
+    rawBuffer.append(exitMsg)
     serverLogger.info(`[PID:${pid}] Exited code=${exitCode} signal=${signal}`)
     serverPIDs.delete(pid)
     serverPtyProcesses.delete(pid)
@@ -724,12 +725,12 @@ export async function stopAllServers(): Promise<void> {
 
 export const clearServerLog = (pid: number): void => {
   const logs = serverLogs.get(pid)
-  if (logs) logs.length = 0
+  if (logs) logs.clear()
 }
 
 export const clearAllServerLogs = (): void => {
   for (const logs of serverLogs.values()) {
-    logs.length = 0
+    logs.clear()
   }
 }
 
@@ -794,7 +795,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function getServerLog(pid: number): string[] {
-  return serverLogs.get(pid) || []
+  const buffer = serverLogs.get(pid)
+  return buffer ? [buffer.read()] : []
 }
 
 // ─── URL Validation ─────────────────────────────────────

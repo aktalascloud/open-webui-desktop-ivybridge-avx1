@@ -1,21 +1,22 @@
-# Open WebUI Desktop · Ivy Bridge AVX1
+# Open WebUI Desktop AVX1
 
-Runtime: Electron 45.1.0; native PTY rebuilt for the pinned runtime. Electron/Chromium are upstream prebuilt engines.
+Unofficial fork with reviewed agent/MCP fixes and extended Russian UI. One latest NSIS EXE.
 
-[English](README.md) · [Русский](README.ru.md) · [Upstream](https://github.com/open-webui/desktop) · [Releases](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest)
+[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
 
-Windows installer with extended Russian interface, dialogs and context menus.
+## Build
 
-Run the latest EXE installer. It uses the optimized WebUI fork and preserves the existing profile.
+Requires Python3.12+, Git and GitHub CLI for CI. No LLM, model weights or Codex dependency.
 
-## Changes
+```cmd
+Build.cmd status
+Build.cmd build
+```
 
-- Independent backend and a verified fork update feed.
-- Compatible WebUI/Terminal packages are staged together.
-- `node-pty`: MSVC `/O2 /GL /arch:AVX` and `/LTCG`. [Full patch list](.avx1/PATCHES.json).
+`build` verifies the clean published commit and dispatches the pinned workflow. For a prepared local compiler/SDK environment: `Build.cmd local`. Dependencies, flags, tests and license gates are in `.avx1/`; lockfiles and source history are retained. Signing keys stay outside the repository.
 
-## Evidence
+## Run and verify
 
-Native terminal startup passed on Xeon E5-2697 v2. GUI/LLM speed percentages have not been measured. Electron and Python retain vendor binaries; PGO is disabled.
+Use the single release package. Keep user data separate from source. Settings, endpoints and model selection are runtime configuration, not build requirements. Ivy Bridge: AVX/F16C, O3 and verified LTO, without AVX2/FMA/PGO/fast-math. Android: ARM64 release AOT; source-built and prebuilt libraries are identified in the package manifest.
 
-Original licenses/notices and source history are preserved. Exact corresponding source is linked from each release. Credentials, logs, models and private filter/bridge code stay outside the public packages.
+Current checks and measurements: [.avx1/measurements/latest.json](.avx1/measurements/latest.json). CPU microbenchmarks are not LLM tokens/s. Original licenses and notices apply.

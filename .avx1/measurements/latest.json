@@ -1,0 +1,11 @@
+{
+  "scope": "current selected checks; final package and deployment receipts are recorded after CI",
+  "inference_speedup_percent": null,
+  "model_required_for_build": false,
+  "memory_fixture": {
+    "input_utf8_bytes": 200000,
+    "retained_payload_limit_bytes": 1024,
+    "invalid_utf8_replacement": false,
+    "scope": "synthetic OutputBuffer test; not CPU/inference throughput"
+  }
+}
