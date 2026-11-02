@@ -106,7 +106,8 @@ def build_desktop(package, manifest):
         ROOT/'.avx1/connection-view.test.mjs', ROOT/'.avx1/voice-input-session.test.mjs',
         ROOT/'.avx1/voice-input-ipc.test.mjs', ROOT/'.avx1/voice-input-recorder.test.mjs',
         ROOT/'.avx1/open-terminal-lifecycle.test.mjs', ROOT/'.avx1/terminal-dock.test.mjs',
-        ROOT/'.avx1/desktop-update-policy.test.mjs', ROOT/'.avx1/package-policy.test.mjs', env=environment)
+        ROOT/'.avx1/desktop-update-policy.test.mjs', ROOT/'.avx1/package-policy.test.mjs',
+        ROOT/'.avx1/packaged-launch.test.cjs', env=environment)
     run("npm", "audit", "--omit=dev", "--audit-level=high", env=environment)
     run("npm", "run", "build", env=environment)
     original=json.loads((ROOT/'package.json').read_text('utf-8'))['version']

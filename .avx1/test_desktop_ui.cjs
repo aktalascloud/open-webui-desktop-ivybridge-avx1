@@ -1,14 +1,26 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { _electron } = require(process.env.TEST_PLAYWRIGHT)
+const { _electron, chromium } = require(process.env.TEST_PLAYWRIGHT)
+const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses')
+const { smokeHardened } = require('./packaged-launch.cjs')
+const { createHash } = require('node:crypto')
 ;(async () => {
   const executablePath = process.argv[2]
   const profile = process.argv[3]
   fs.mkdirSync(profile, { recursive: true })
-  const app = await _electron.launch({ executablePath, args: ['--no-sandbox', '--disable-gpu'], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
+  await smokeHardened(executablePath, profile + '-production', chromium, process.env.EXPECTED_DESKTOP_VERSION)
+  // Main-process inspection needs its fuse; instrument only an unshipped sibling EXE.
+  // The first smoke above runs the exact installed production EXE with all fuses intact.
+  const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+  const before = digest(executablePath)
+  const inspectionExecutable = path.join(path.dirname(executablePath), 'open-webui-inspection-fixture.exe')
+  fs.copyFileSync(executablePath, inspectionExecutable, fs.constants.COPYFILE_EXCL)
+  let app
   let guestServer
   try {
+    await flipFuses(inspectionExecutable, { version: FuseVersion.V1, [FuseV1Options.EnableNodeCliInspectArguments]: true })
+    app = await _electron.launch({ executablePath: inspectionExecutable, args: ['--no-sandbox', '--disable-gpu'], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
     await app.firstWindow()
     let page = app.windows()[0]
     for (const candidate of app.windows()) {
@@ -62,5 +74,10 @@ const { _electron } = require(process.env.TEST_PLAYWRIGHT)
     await page.evaluate(() => document.getElementById('security-guest-fixture').remove())
     console.log('PACKAGED_GUEST_TRUST_BOUNDARY_VERIFIED')
     console.log('NSIS_RUSSIAN_ONBOARDING_RENDERED_NO_PAGE_ERRORS')
-  } finally { await app.close(); if (guestServer) await new Promise(resolve => guestServer.close(resolve)) }
+  } finally {
+    if (app) await app.close()
+    if (guestServer) await new Promise(resolve => guestServer.close(resolve))
+    fs.unlinkSync(inspectionExecutable)
+    assert.equal(digest(executablePath), before, 'Production EXE must remain unmodified')
+  }
 })().catch(error => { console.error(error); process.exitCode = 1 })

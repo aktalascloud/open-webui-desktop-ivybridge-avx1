@@ -50,6 +50,8 @@ jobs:
             .avx1-work/security-gate.json
             .avx1-work/desktop-test-profile/russian-failure.png
             .avx1-work/desktop-test-profile/renderer-state.json
+            .avx1-work/desktop-test-profile-production/launch-failure.txt
+            .avx1-work/desktop-test-profile-production/russian-onboarding.png
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 3

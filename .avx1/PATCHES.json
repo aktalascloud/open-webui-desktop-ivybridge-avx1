@@ -85,5 +85,10 @@
     "id": "DESK-DEPENDENCIES-PACKAGE",
     "description": "Refresh compatible lockfile versions after the official upstream baseline exposed runtime dependency advisories. Runtime npm audit now reports0 known findings; Electron45.2.1 and node-pty1.1.0 version/integrity remain unchanged during this refresh. Package only generated out/resources and normal production modules, excluding source/build caches/debug payloads; explicitly retain AGPL and Vazirmatn font notices.",
     "verification": "Fresh production npm audit;50 affected-source cases plus2 actual electron-builder matcher/resource checks. This does not claim a complete Electron/Chromium CVE audit or packaged UI/startup proof."
+  },
+  {
+    "id": "DESK-HARDENED-PACKAGE-SMOKE",
+    "description": "Preserve upstream disabled Node inspector/options and ASAR integrity fuses. Test the unmodified installed EXE through loopback Chromium CDP first; inspect main-process guest preferences only in an unshipped sibling EXE with the single inspector fuse changed. Verify original EXE digest stays unchanged.",
+    "verification": "Two fuse/endpoint contract cases pass; actual packaged startup/guest verification remains mandatory in the corrected CI. Prior CI compiled and installed successfully but its old Electron-inspector harness timed out; no failed build was installed or published."
   }
 ]
