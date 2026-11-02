@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-11-02
+
+### Fixed
+
+- **llama.cpp installation with Latest selected.** Fixed installation and updates failing with “No matching asset found” after llama.cpp changed how it publishes releases. Desktop now finds the download belonging to the selected release (#334).
+- **AMD llama.cpp downloads on Windows and Linux.** Fixed downloads failing because Desktop requested outdated filenames. The ROCm option now recognizes the renamed downloads and still opens previously installed versions without an internet connection (#334).
+- **llama.cpp offering an older version as an update.** If you already have a newer numbered build installed, checking for updates no longer offers an older build from the latest release.
+- **llama.cpp stopping when an update has no matching download.** Desktop now checks that the selected download exists before stopping llama.cpp. If it is missing, the running model server stays running.
+- **macOS installer creation.** Fixed the signing password error that prevented macOS installers from being created. Apple signing and security checks are still required before publishing.
+
+### Changed
+
+- **Model folder display.** In Settings → Models, the folder path now has its own full-width button below the description. Long paths shorten to fit the window; hover to see the full path or click to open the folder.
+- **Get Started button.** Its arrow now moves slightly to the right on hover. The animation respects your system's reduced-motion setting.
+- **Windows releases when signing fails.** Desktop still attempts to sign Windows installers, but a signing failure no longer blocks publishing. An unsigned installer may show an unknown-publisher or Windows SmartScreen warning.
+
+## [0.1.3] - 2026-11-01
+
+### Fixed
+
+- **Linux graphics staying slow after an update.** Desktop now tries normal graphics again after its built-in browser is updated. A past graphics crash no longer keeps it permanently in software rendering. If graphics crashes again, Desktop still retries with software rendering.
+
+### Changed
+
+- **Debian, Ubuntu, and Linux Mint downloads.** Added direct installer links and instructions for AppImage users whose app fails to open with a `chrome-sandbox` error.
+
+## [0.1.2] - 2026-11-01
+
+### Fixed
+
+- **Folder uploads and syncing.** Selecting a folder in Workspace → Knowledge no longer fails with “Directory selection was cancelled.” Desktop allows reading the folder you selected while keeping write access blocked (#271).
+- **Slow Linux interface.** Desktop no longer forces every Linux computer to draw the interface without GPU acceleration. Software rendering remains available after a graphics crash, and explicit graphics choices are respected (#273).
+- **Linux tray clicks.** Clicking the tray icon now brings Desktop forward, restores a minimized window, or opens a new window if the previous one was closed (#203).
+- **GNOME Flatpak shortcuts.** Updated shortcut support and corrected the app identity sent to GNOME so the desktop shortcut can register and bring the window forward (#126).
+
+## [0.1.1] - 2026-11-01
+
+### Added
+
+- **Optional automatic Desktop updates.** Enable Automatic desktop updates in Settings → About to download new versions in the background and install them when you quit. It is off by default. Desktop now checks at launch and every six hours, and shows a dismissible notification when an update is available or ready to install (#100).
+- **Start with the window hidden.** Added Start minimized to tray in Settings → General, off by default. Open Desktop from the tray or your global shortcut when you need it. A previously maximized window stays hidden until you open it (#235).
+- **Hide the macOS menu bar icon.** Turn off Show Open WebUI in menu bar in Settings → General. The icon hides or returns immediately, without restarting Desktop (#213).
+- **Copy and save images.** Right-click an image in Open WebUI to choose Copy Image or Save Image As… (#230).
+- **Bulgarian language.** Added Български to Desktop's language selector, with translations for setup, settings, and status messages (#261).
+
+### Changed
+
+- **Local models keep the installed llama.cpp version.** Starting llama.cpp now reuses the newest compatible version already on your computer without checking for a newer release. Use Update in its settings when you want to upgrade. A failed update download keeps the previously installed version available (#193).
+- **Clearer Linux update options.** Snap and Flatpak installations now explain how to update through your package manager or download a newer package, instead of showing an update check that never finishes.
+- **Simpler download links.** The README groups downloads under macOS, Windows, and Linux, and fixes the broken Intel/AMD Linux AppImage link (#239).
+- **Windows shortcuts.** The Windows installer explicitly enables both desktop and Start menu shortcuts by default (#232).
+
+### Fixed
+
+- **Screen sharing inside Open WebUI.** Fixed screen capture requests failing inside the Desktop window (#206).
+- **Open WebUI left broken after an interrupted update.** Desktop now stops Open WebUI before updating, prevents overlapping installations, and does not try to start it after an update fails. Retrying Install or Update in Settings repairs an interrupted installation without deleting chats or settings (#220).
+- **NVIDIA acceleration on Windows.** Installing the CUDA version of llama.cpp now also downloads the matching NVIDIA support files. Existing installations missing those files are repaired on the next start (#198).
+- **Update progress disappearing.** Closing and reopening Settings → About now retains the available version, download progress, and Restart to Update action.
+- **Linux ARM64 update checks.** Fixed the missing update information that prevented ARM64 installations from finding new Desktop releases.
+- **Snap failing to open.** Fixed the Linux Snap package closing before showing a window because its bundled components required newer system libraries than the package provided (#176).
+- **macOS header changing height.** The top bar now stays the same slim height while Open WebUI starts or stops.
+- **Windows release builds.** Fixed a build failure that prevented the Windows installer from being created with the newer Windows build tools.
+
+### Security
+
+- **Check downloads before using them.** Desktop now verifies that Python, llama.cpp, and Hugging Face model downloads match the original files, rejecting incomplete or changed downloads. Large setup downloads also use less memory.
+- **Restrict links and model file locations.** Only web and email links can open outside Desktop. Model filenames that try to save or delete files outside the model folder are rejected.
+- **Require release signing checks.** Release preparation now stops if Windows signing or Apple's signing and security checks fail, instead of falling back to publishing unsigned installers.
+
+## [0.1.0] - 2026-11-01
+
+### Changed
+
+- **Focused on your own computer.** Desktop now focuses on setting up Open WebUI on your computer and opening it whenever you need it. Get Started installs and opens your local copy. If you use Open WebUI on another server, [Open WebUI Tether](https://github.com/open-webui/tether) is the companion app for extending what you can do with it.
+- **More room for Open WebUI.** Removed the desktop connection sidebar and replaced the old toolbar with a slim header showing the current page title. The header follows Open WebUI's light, dark, and OLED themes. Windows keeps its familiar minimize, maximize, and close buttons. The window can now shrink to 360 pixels wide, including a square layout.
+- **Controls in the bottom bar.** Settings now sits at the bottom left, with the app version and page refresh on the right. Click Open WebUI to show or hide its activity log, restart it from the open panel, or use the arrow beside its name to open it in your browser when the panel is closed. Refresh reloads the page without restarting Open WebUI.
+- **Startup progress you can inspect.** The loading screen shows the latest startup message beneath “Loading…”. Click that message to open the full log. Logs remain available if startup fails, and the panel can be resized and its output copied.
+- **Settings that match Open WebUI.** Added search to find the relevant settings section, grouped navigation, a Back button, and stronger text contrast in both themes. Tabs scroll horizontally in narrow windows. Text uses your system font, with smaller icons and tooltips throughout the app.
+- **New default shortcut.** Press Cmd+Shift+O on macOS or Ctrl+Shift+O on Windows and Linux to bring Desktop forward. Existing saved shortcuts stay unchanged.
+- **Optional local models.** The llama.cpp option is now off by default during installation. You can choose to enable it during setup or later in Settings.
+
+### Removed
+
+- **Remote server connections.** Desktop no longer adds, opens, or switches between Open WebUI servers hosted elsewhere, including previously saved connections.
+- **Desktop chat overlays and shortcuts.** Removed the floating Spotlight chat bar, its screenshot capture and clipboard auto-paste, system-wide voice input, and the shortcut for starting a call.
+- **Built-in Open Terminal.** Desktop no longer installs, starts, or manages Open Terminal. Its setup option, settings, and status controls have been removed.
+
+### Fixed
+
+- **Custom ports and local network sharing.** Desktop follows the running server's actual port after a restart and connects through loopback when LAN sharing is enabled. Port selection now checks whether the server can bind, including on Windows (#250, #207).
+- **Open WebUI stuck on its splash screen.** Fixed loading inside Desktop and kept Open WebUI's regular interface without the extra server selector.
+- **Starting, stopping, and restarting.** Repeated starts no longer launch duplicate copies of Open WebUI or llama.cpp. Stopping during startup cancels the pending start, and an older copy exiting no longer marks a newer copy as stopped. Quitting Desktop waits for both to shut down.
+- **Incorrect running status.** A failed start or unexpected exit now updates the controls and shows the failure instead of continuing to report that everything is running.
+- **Logs during long sessions.** Limited the amount of old output kept in memory and stopped closed log views from leaving unused connections behind. Opening another log view no longer disconnects the first one.
+- **Local model startup preference.** Fixed the llama.cpp “Start on Launch” switch so changing it saves your choice.
+- **Desktop settings protected from page requests.** Pages shown inside the app can no longer request changes to desktop settings, stop local services, or reset the app.
+- **Linux updates.** Fixed release packaging so the update download list includes ARM64 builds alongside Intel and AMD builds.
+
 ## [0.0.20] - 2026-05-07
 
 ### Fixed

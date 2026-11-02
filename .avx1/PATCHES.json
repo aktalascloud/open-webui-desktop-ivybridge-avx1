@@ -58,5 +58,32 @@
       "https://github.com/open-webui/desktop/commit/877700e9969d51b1b06c42387cf9d5d94f5c9090"
     ],
     "verification": "Targeted regressions plus exact-source package/privacy/security/startup gates; final CI receipt records actual scope."
+  },
+  {
+    "id": "DESK-011",
+    "description": "Mainstream0.1.4 compatibility candidate: retain the complete upstream connection/launcher view per keyed saved connection, native voice/Terminal controls and strict guest relays. Preserve atomic fork installs and an external backend observed without child ownership. Restore real renderer typechecking via tsconfig.web.json. Separate native microphone session; reject iframe/redirect capture and post-navigation capability delivery.",
+    "upstream_commit": "38e54c7ba8266db1b14a9aaad6560f9cdf924005",
+    "verification": "17 selected source-level lifecycle/guest/permission/connection tests; Node typecheck and304-file renderer check0 errors16 warnings;329 Russian keys/placeholders. Candidate not yet packaged or installed; TerminalDock/startup/remaining contract review pending."
+  },
+  {
+    "id": "DESK-VOICE-ACCOUNT",
+    "description": "Remove the global voice token and scan-all-webviews fallback. Voice preflight reads only the exact selected guest owned by the trusted main frame and expected persistent partition. Each recording captures its target/account and gets one non-replayable STT submission; redirect responses are refused. Revalidate account/selection before upload and transcript delivery, and deliver only the server result. Session IDs prevent late microphone grants, HTTP results or close events from affecting a newer recording.",
+    "verification": "9 authority/session,5 actual IPC callback and2 synthetic MediaRecorder cases pass; no real media device, live account/token, STT inference or physical-phone probe. Package render/startup qualification remains pending."
+  },
+  {
+    "id": "DESK-TERMINAL-DOCK",
+    "description": "Bring upstream TerminalDock to all3 services while retaining saved connections/sidebar and keyed webview refresh. Replace raw Open Terminal PTY/log state with shared bounded run-scoped lifecycle/channel. Project-managed Terminal observes authenticated health only, never installs/spawns/mutates its key or owns termination while connecting. An explicit update delegates installation to the existing guarded project controller. Standalone starts share one child and reject an occupied configured port. Keys stay outside argv; active UI actions on external services reconnect instead of restarting processes.",
+    "verification": "10 synthetic owned/external/update/abort/key/output lifecycle cases and3 dock-action cases; real renderer check and package qualification tracked separately.",
+    "dependency": "External adapter requires Terminal fork /api/health. Qualify/install compatible Terminal before the new Desktop; do not use an unauthenticated/legacy fallback."
+  },
+  {
+    "id": "DESK-UPDATE-TRANSACTION",
+    "description": "Terminal Settings update/install now invokes the guarded updater instead of reconnecting. A reserved update transaction shares concurrent start/update requests; stop/shutdown waits for the atomic installer and suppresses reattachment. Project-managed packages cannot reach direct pip uninstall. Preserve the qualified external-backend ASAR identifier on its actual observed lifecycle path and restore original voice chime assets removed upstream.",
+    "verification": "3 new updater lifecycle cases,3 actual settings/uninstall policy cases and3 isolated maintenance controller policy cases; no live update executed. Private CODE suites remain waived while source fingerprints/core/state/owner gates stay enabled."
+  },
+  {
+    "id": "DESK-DEPENDENCIES-PACKAGE",
+    "description": "Refresh compatible lockfile versions after the official upstream baseline exposed runtime dependency advisories. Runtime npm audit now reports0 known findings; Electron45.2.1 and node-pty1.1.0 version/integrity remain unchanged during this refresh. Package only generated out/resources and normal production modules, excluding source/build caches/debug payloads; explicitly retain AGPL and Vazirmatn font notices.",
+    "verification": "Fresh production npm audit;50 affected-source cases plus2 actual electron-builder matcher/resource checks. This does not claim a complete Electron/Chromium CVE audit or packaged UI/startup proof."
   }
 ]

@@ -1,204 +1,126 @@
-// @ts-nocheck
-
-import crypto from 'crypto'
+import crypto from 'node:crypto'
+import os from 'node:os'
 import log from 'electron-log'
-import * as pty from 'node-pty'
+import { ManagedService, waitForReady } from '../process/managedService'
+import { spawnPty } from '../process/nativePty'
 import {
-  getPythonPath,
-  getConfig,
-  setConfig,
-  installPackage,
-  isPackageInstalled,
-  isPythonInstalled,
-  installPython,
-  portInUse
+  getPythonPath, getConfig, setConfig, installPackage, isPackageInstalled,
+  isPythonInstalled, installPython, portInUse, pythonEnv
 } from './index'
-import { ServiceLock, isProcessAlive } from './service-lock'
 
-// ─── State ──────────────────────────────────────────────
-
-let ptyProcess: pty.IPty | null = null
-let pid: number | null = null
-let url: string | null = null
+export const terminalService = new ManagedService(spawnPty)
 let apiKey: string | null = null
-let status: string | null = null // null | starting | started | stopped | failed
-let logBuffer: string[] = []
+let updateGeneration = 0
+let updatePending: Promise<ReturnType<typeof getOpenTerminalInfo>> | undefined
 
-const lock = new ServiceLock('open-terminal')
-
-// ─── Public API ─────────────────────────────────────────
-
-export const getOpenTerminalInfo = () => ({
-  url,
-  apiKey,
-  status,
-  pid
+terminalService.subscribe(event => {
+  if (event.type === 'state' && ['stopped', 'failed'].includes(event.info.status)) apiKey = null
 })
 
-export const getOpenTerminalPty = (): pty.IPty | null => ptyProcess
-export const getOpenTerminalLog = (): string[] => logBuffer
+export const getOpenTerminalInfo = () => ({
+  ...terminalService.info,
+  apiKey: terminalService.info.reachable ? apiKey : null
+})
 
-export const startOpenTerminal = async (
-  port: number | null = null,
-  onStatus?: (status: string) => void
-): Promise<{ url: string; apiKey: string; pid: number }> => {
-  if (!lock.acquire()) {
-    return { url, apiKey, pid }
-  }
-
-  await stopOpenTerminal()
-
-  if (!isPythonInstalled()) {
-    log.info('Python not installed — installing automatically for Open Terminal…')
-    onStatus?.('Installing Python…')
-    try {
-      const ok = await installPython(undefined, onStatus)
-      if (!ok) throw new Error('Python installation returned false')
-    } catch (err) {
-      throw new Error(
-        `Python is required for Open Terminal but installation failed: ${err?.message ?? err}`
-      )
-    }
-    if (!isPythonInstalled()) {
-      throw new Error(
-        'Python was installed but could not be verified. Please restart the app and try again.'
-      )
-    }
-  }
-
-  if (!isPackageInstalled('open-terminal')) {
-    log.info('open-terminal not installed, attempting install...')
-    onStatus?.('Installing Open Terminal package…')
-    try {
-      await installPackage('open-terminal')
-    } catch (err) {
-      throw new Error(
-        `Open Terminal is not installed and auto-install failed. ` +
-        `Please connect to the internet and try again. (${err?.message ?? err})`
-      )
-    }
-  }
-
-  const pythonPath = getPythonPath()
-  const host = '127.0.0.1'
-  const config = await getConfig()
-  const configEnvVars = config.envVars ?? {}
-
-  // Use persisted API key or generate and save a new one
-  let generatedKey = config.openTerminal?.apiKey
-  if (!generatedKey) {
-    generatedKey = crypto.randomBytes(24).toString('base64url')
-    await setConfig({
-      openTerminal: { ...config.openTerminal, apiKey: generatedKey }
-    })
-  }
-
-  // Find available port
-  let desiredPort = port || 39284
-  let availablePort = desiredPort
-  while (await portInUse(availablePort, host)) {
-    availablePort++
-    if (availablePort > desiredPort + 100) {
-      throw new Error('No available port found for Open Terminal')
-    }
-  }
-
-  const cwd = config.openTerminal?.cwd || require('os').homedir()
-
-  const commandArgs = [
-    '-c', 'from open_terminal.cli import main; main()', 'run',
-    '--host', host,
-    '--port', availablePort.toString(),
-    '--api-key', generatedKey,
-    '--cwd', cwd
-  ]
-
-  log.info('Starting Open Terminal...', pythonPath)
-
-  let spawned: pty.IPty
-  try {
-    spawned = pty.spawn(pythonPath, commandArgs, {
-      name: 'xterm-256color',
-      cols: 200,
-      rows: 50,
-      env: {
-        ...process.env,
-        ...(configEnvVars ?? {}),
-        PYTHONUNBUFFERED: '1',
-        ...(process.platform === 'win32' ? { PYTHONIOENCODING: 'utf-8' } : {})
-      }
-    })
-  } catch (error) {
-    throw new Error(
-      `Failed to spawn Open Terminal: ${error?.message ?? error}`
-    )
-  }
-
-  const spawnedPid = spawned.pid
-  logBuffer = []
-  ptyProcess = spawned
-  pid = spawnedPid
-  apiKey = generatedKey
-  status = 'starting'
-
-  spawned.onData((data: string) => {
-    logBuffer.push(data)
-    log.info(`[OpenTerminal:${spawnedPid}] ${data.replace(/[\r\n]+/g, ' ').trim()}`)
+async function authenticatedReady(url: string, key: string, signal: AbortSignal): Promise<boolean> {
+  const response = await fetch(`${url}/api/health`, {
+    headers: { Authorization: `Bearer ${key}` },
+    redirect: 'error', signal
   })
-
-  spawned.onExit(({ exitCode, signal }) => {
-    log.info(`[OpenTerminal:${spawnedPid}] Exited code=${exitCode} signal=${signal}`)
-    ptyProcess = null
-    pid = null
-    url = null
-    apiKey = null
-    status = 'stopped'
-  })
-
-  const serverUrl = `http://${host}:${availablePort}`
-  url = serverUrl
-  status = 'started'
-  log.info(`Open Terminal started — PID: ${spawnedPid}, URL: ${serverUrl}`)
-
-  return { url: serverUrl, apiKey: generatedKey, pid: spawnedPid }
+  if (!response.ok) return false
+  return (await response.json())?.status === 'ok'
 }
 
-export const stopOpenTerminal = async (): Promise<void> => {
-  if (ptyProcess) {
-    try {
-      ptyProcess.kill()
-    } catch (e) {
-      log.warn('Failed to kill Open Terminal PTY:', e)
+async function startTerminal(port: number | null, onStatus: ((status: string) => void) | undefined, upgrade = false) {
+  await terminalService.start(async signal => {
+    let config = await getConfig()
+    const desiredPort = port ?? config.openTerminal?.port ?? 39284
+    if (!Number.isInteger(desiredPort) || desiredPort < 1 || desiredPort > 65535) {
+      throw new Error('Invalid Open Terminal port')
     }
-    // Give it a moment to exit
-    await new Promise((r) => setTimeout(r, 1000))
-    // Force kill if still running
-    if (pid) {
-      try {
-        process.kill(pid, 0) // check alive
-        process.kill(pid, 'SIGKILL')
-      } catch {
-        // already dead
+    const url = `http://127.0.0.1:${desiredPort}`
+    if (config.localServer?.managedBackend === true) {
+      let key = config.openTerminal?.apiKey
+      if (typeof key !== 'string' || !key) throw new Error('Managed Open Terminal credentials are unavailable')
+      if (upgrade) {
+        await installPackage('open-terminal', undefined, onStatus, signal)
+        signal.throwIfAborted()
+        config = await getConfig()
+        if (config.localServer?.managedBackend !== true || (config.openTerminal?.port ?? 39284) !== desiredPort) {
+          throw new Error('Open Terminal configuration changed during update')
+        }
+        key = config.openTerminal?.apiKey
+        if (typeof key !== 'string' || !key) throw new Error('Managed Open Terminal credentials are unavailable')
+      }
+      apiKey = key
+      return {
+        external: true as const, url,
+        ready: async (signal: AbortSignal) => {
+          if (!await authenticatedReady(url, key, AbortSignal.any([signal, AbortSignal.timeout(5000)]))) {
+            throw new Error('Managed Open Terminal is unavailable or needs the current authenticated health endpoint. Use the project launcher.')
+          }
+        }
       }
     }
-  }
-  ptyProcess = null
-  pid = null
-  url = null
-  apiKey = null
-  status = null
-  logBuffer = []
-  lock.release()
+    // An occupied configured port is not authority to create another instance.
+    if (await portInUse(desiredPort, '127.0.0.1')) throw new Error('Open Terminal port is already in use')
+    signal.throwIfAborted()
+    if (!isPythonInstalled() && !await installPython(undefined, onStatus, signal)) {
+      throw new Error('Python installation failed')
+    }
+    if (upgrade || !isPackageInstalled('open-terminal')) await installPackage('open-terminal', undefined, onStatus, signal)
+    signal.throwIfAborted()
+    // Re-read before saving a newly generated key, preserving concurrent settings.
+    const fresh = await getConfig()
+    if (fresh.localServer?.managedBackend === true || (port ?? fresh.openTerminal?.port ?? 39284) !== desiredPort) {
+      throw new Error('Open Terminal configuration changed during update')
+    }
+    let key = fresh.openTerminal?.apiKey
+    if (!key) {
+      key = crypto.randomBytes(24).toString('base64url')
+      await setConfig({ openTerminal: { ...fresh.openTerminal, apiKey: key } })
+    }
+    if (typeof key !== 'string') throw new Error('Invalid Open Terminal credentials')
+    apiKey = key
+    const env = pythonEnv(fresh.envVars ?? {})
+    for (const name of Object.keys(env)) {
+      if (/^OPEN_TERMINAL_API_KEY(?:_FILE)?$/i.test(name)) delete env[name]
+    }
+    env.OPEN_TERMINAL_API_KEY = key
+    env.PYTHONUNBUFFERED = '1'
+    onStatus?.('Starting Open Terminal…')
+    log.info('Starting owned Open Terminal at configured loopback port')
+    return {
+      file: getPythonPath(),
+      args: ['-c', 'from open_terminal.cli import main; main()', 'run', '--host', '127.0.0.1',
+        '--port', String(desiredPort), '--cwd', fresh.openTerminal?.cwd || os.homedir()],
+      env, url,
+      ready: (signal: AbortSignal) => waitForReady(probe => authenticatedReady(url, key, probe), signal)
+    }
+  })
+  return getOpenTerminalInfo()
 }
 
-/**
- * Validate whether the tracked Open Terminal process is still alive.
- */
-export const validateOpenTerminalProcess = (): boolean => {
-  if (!pid) return false
-  if (isProcessAlive(pid)) return true
-  pid = null
-  status = null
-  lock.release()
-  return false
+export function startOpenTerminal(port: number | null = null, onStatus?: (status: string) => void) {
+  return updatePending ?? startTerminal(port, onStatus)
+}
+
+export function updateOpenTerminal(onStatus?: (status: string) => void) {
+  if (updatePending) return updatePending
+  const generation = ++updateGeneration
+  // Reserve before stopping; concurrent starts/updates share this transaction.
+  const pending = Promise.resolve().then(async () => {
+    await terminalService.stop()
+    if (generation !== updateGeneration) throw new Error('Open Terminal update cancelled')
+    // The shared lifecycle owns preparation: stop/shutdown waits for the atomic
+    // installer and prevents spawning or attaching after cancellation.
+    return startTerminal(null, onStatus, true)
+  }).finally(() => { if (updatePending === pending) updatePending = undefined })
+  updatePending = pending
+  return pending
+}
+
+export function stopOpenTerminal() {
+  updateGeneration++
+  return terminalService.stop()
 }

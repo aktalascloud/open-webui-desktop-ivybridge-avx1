@@ -10,5 +10,8 @@
   "statusBar.server": "Open WebUI",
   "settings.tabs.openwebui": "Open WebUI",
   "settings.tabs.terminal": "Open Terminal",
-  "settings.inference.llamaServer": "llama-server"
+  "settings.inference.llamaServer": "llama-server",
+  "common.url": "URL",
+  "common.processId": "PID",
+  "settings.tabs.openTerminal": "Open Terminal"
 }

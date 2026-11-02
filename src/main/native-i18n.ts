@@ -4,6 +4,17 @@ import russian from '../renderer/src/lib/i18n/locales/ru-RU/translation.json'
 let language = 'ru-RU'
 const messages = new Map<string, string>(Object.entries(english).map(([key, value]) => [value, (russian as Record<string, string>)[key] ?? value] as [string, string]))
 Object.entries({
+  "Open the selected connection and sign in before using voice input.": "Откройте выбранное подключение и войдите в аккаунт перед голосовым вводом.",
+  "Not authenticated. Open the selected connection and sign in before using voice input.": "Нет авторизации. Откройте выбранное подключение и войдите в аккаунт перед голосовым вводом.",
+  "Voice connection is unavailable": "Подключение для голосового ввода недоступно",
+  "Voice connection changed": "Подключение для голосового ввода изменилось",
+  "Voice input connection changed": "Подключение изменилось. Начните новую голосовую запись.",
+  "Voice input account changed": "Аккаунт изменился. Начните новую голосовую запись.",
+  "Voice input already submitted or expired": "Запись уже отправлена или устарела",
+  "Voice input expired": "Голосовая запись устарела",
+  "Voice input superseded": "Начата новая голосовая запись",
+  "Voice transcription is not ready": "Распознавание ещё не завершено",
+  "Voice input unavailable": "Голосовой ввод недоступен",
   'Show Open WebUI': 'Показать Open WebUI',
   'Quit Open WebUI': 'Выйти из Open WebUI',
   'Open WebUI (Local)': 'Open WebUI (локально)',

@@ -3,6 +3,7 @@
 
   const api = window.voiceInputAPI
 
+  let sessionId = 0
   let recording = $state(false)
   let transcribing = $state(false)
   let duration = $state(0)
@@ -48,70 +49,57 @@
     animFrame = requestAnimationFrame(animateLevel)
   }
 
-  const showError = (msg: string) => {
+  const showError = (msg: string, id = sessionId) => {
+    if (id !== sessionId) return
+    cleanup()
     errorMsg = msg
     if (errorTimer) clearTimeout(errorTimer)
     errorTimer = setTimeout(() => {
+      if (id !== sessionId) return
       errorMsg = ''
-      api?.close()
+      api?.close(id)
+      sessionId = 0
     }, 3000)
   }
 
-  const startRecording = async () => {
-    // Reset all state from any previous session
+  const startRecording = async (id: number) => {
     cleanup()
+    sessionId = id
+    if (errorTimer) { clearTimeout(errorTimer); errorTimer = null }
     errorMsg = ''
-    transcribing = false
     recording = true
     duration = 0
-    audioChunks = []
-    animateLevel() // show placeholder bars immediately
-
-    // Wait for the start chime (played from main process) to finish
-    // before activating mic — macOS ducks audio when mic activates
-    await new Promise((r) => setTimeout(r, 500))
-
+    const chunks: Blob[] = []
+    audioChunks = chunks
+    animateLevel()
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    if (id !== sessionId || !recording) return
     try {
-      // Request system-level mic permission (macOS) before activating the mic
-      const permStatus = await api?.checkMicPermission()
-      if (permStatus === 'denied') {
-        const msg = 'Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone, then restart the app.'
-        showError(msg)
-        api?.error(msg)
-        return
-      }
-
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      audioChunks = []
-
-      // Set up analyser for real audio levels
+      const permission = await api?.checkMicPermission()
+      if (id !== sessionId || !recording) return
+      if (permission === 'denied') throw new Error('Microphone access denied. Check system permissions.')
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (id !== sessionId || !recording) { stream.getTracks().forEach(track => track.stop()); return }
+      mediaStream = stream
       audioCtx = new AudioContext()
       analyser = audioCtx.createAnalyser()
       analyser.fftSize = 64
       dataArray = new Uint8Array(analyser.frequencyBinCount)
-      const source = audioCtx.createMediaStreamSource(mediaStream)
-      source.connect(analyser)
-
-      mediaRecorder = new MediaRecorder(mediaStream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : 'audio/webm'
+      audioCtx.createMediaStreamSource(stream).connect(analyser)
+      const recorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'
       })
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunks.push(e.data)
-      }
-
-      mediaRecorder.start(250)
-      timer = setInterval(() => { duration++ }, 1000)
-    } catch (err: any) {
-      const msg = err?.name === 'NotAllowedError'
-        ? 'Microphone access denied. Check system permissions.'
-        : err?.name === 'NotFoundError'
-          ? 'No microphone found. Connect a microphone and try again.'
-          : err?.message || 'Mic access failed'
-      showError(msg)
-      api?.error(msg)
+      mediaRecorder = recorder
+      recorder.ondataavailable = event => { if (event.data.size > 0) chunks.push(event.data) }
+      recorder.start(250)
+      timer = setInterval(() => { if (id === sessionId) duration++ }, 1000)
+    } catch (error: any) {
+      if (id !== sessionId) return
+      const message = error?.name === 'NotFoundError'
+        ? 'No microphone found. Connect a microphone and try again.'
+        : error?.message || 'Mic access failed'
+      showError(message, id)
+      api?.error(id, message)
     }
   }
 
@@ -137,63 +125,48 @@
   }
 
   const cancelRecording = () => {
+    const id = sessionId
+    sessionId = 0
     cleanup()
-    api?.close()
+    api?.close(id)
   }
 
   const stopRecording = async () => {
-    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-      cancelRecording()
-      return
-    }
-
-    // Too short — treat as cancel (less than 0.8 seconds)
-    if (duration < 1) {
-      cancelRecording()
-      return
-    }
-
+    const id = sessionId
+    const recorder = mediaRecorder
+    if (!recorder || recorder.state === 'inactive' || duration < 1) { cancelRecording(); return }
+    const chunks = audioChunks
+    const stream = mediaStream
+    const context = audioCtx
     recording = false
     if (timer) { clearInterval(timer); timer = null }
     if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null }
     levels = Array(5).fill(0.15)
-
-    const audioBlob = await new Promise<Blob>((resolve) => {
-      mediaRecorder!.onstop = () => {
-        resolve(new Blob(audioChunks, { type: mediaRecorder!.mimeType }))
-      }
-      mediaRecorder!.stop()
+    const audioBlob = await new Promise<Blob>(resolve => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType }))
+      recorder.stop()
     })
-
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop())
-      mediaStream = null
-    }
-    if (audioCtx) {
-      audioCtx.close()
-      audioCtx = null
-      analyser = null
-    }
-
-    if (audioBlob.size < 4096) {
-      api?.close()
-      return
-    }
-
+    stream?.getTracks().forEach(track => track.stop())
+    void context?.close()
+    if (id !== sessionId) return
+    if (mediaStream === stream) mediaStream = null
+    if (audioCtx === context) { audioCtx = null; analyser = null }
+    if (mediaRecorder === recorder) mediaRecorder = null
+    if (audioBlob.size < 4096) { cancelRecording(); return }
     transcribing = true
     try {
       const buffer = await audioBlob.arrayBuffer()
-      const result = await api?.transcribe(buffer)
-      const text = result?.text?.trim()
-      if (text) {
-        api?.done(text)
-      } else {
-        api?.close()
-      }
-    } catch (err: any) {
-      const msg = err?.message || 'Transcription failed'
-      showError(msg)
-      api?.error(msg)
+      if (id !== sessionId) return
+      const result = await api?.transcribe(id, buffer)
+      if (id !== sessionId) return
+      if (result?.text?.trim()) await api?.done(id)
+      else await api?.close(id)
+      if (id === sessionId) { sessionId = 0; cleanup() }
+    } catch (error: any) {
+      if (id !== sessionId) return
+      const message = error?.message || 'Transcription failed'
+      showError(message, id)
+      api?.error(id, message)
     }
   }
 
@@ -214,12 +187,13 @@
 
   onMount(() => {
     api?.onRecordingState((data) => {
-      if (data.recording && !recording) startRecording()
-      else if (!data.recording && recording) stopRecording()
+      if (data.recording && data.sessionId !== sessionId) void startRecording(data.sessionId)
+      else if (!data.recording && data.sessionId === sessionId && recording) void stopRecording()
     })
   })
 
   onDestroy(() => {
+    sessionId = 0
     cleanup()
     if (errorTimer) clearTimeout(errorTimer)
   })

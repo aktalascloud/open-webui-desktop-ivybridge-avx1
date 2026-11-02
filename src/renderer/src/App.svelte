@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { appInfo, config, connections, serverInfo, appState } from './lib/stores'
+  import { appInfo, config, serverInfo, appState, desktopUpdate } from './lib/stores'
 
   import Main from './lib/components/Main.svelte'
 
+  let unsubscribe: (() => void) | undefined
   let themeMediaQuery: MediaQueryList
   let themeChangeHandler: ((e: MediaQueryListEvent) => void) | null = null
 
@@ -22,7 +23,6 @@
 
     appInfo.set(await api.getAppInfo())
     config.set(await api.getConfig())
-    connections.set(await api.getConnections())
 
     // Apply saved theme
     const savedTheme = (await api.getConfig())?.theme ?? 'system'
@@ -38,25 +38,32 @@
     }
     themeMediaQuery.addEventListener('change', themeChangeHandler)
 
-    api.onData((data: any) => {
-      if (data.type === 'status:server') {
-        serverInfo.update((info) => ({ ...info, status: data.data }))
+    let receivedUpdate = false
+    unsubscribe = api.onData((data: any) => {
+      if (data.type === 'server:info') serverInfo.set(data.data)
+      if (data.type === 'update:state') {
+        receivedUpdate = true
+        desktopUpdate.set(data.data)
       }
-      if (data.type === 'server:ready') {
-        serverInfo.update((info) => ({ ...info, reachable: true, url: data.data?.url }))
-      }
+
+    })
+
+    // Update discovery must not delay server status or the rest of startup.
+    api.getUpdateState().then((update) => {
+      if (!receivedUpdate) desktopUpdate.set(update)
+    }).catch((error) => {
+      if (!receivedUpdate) desktopUpdate.set({ status: 'error', error: String(error) })
     })
 
     // Don't auto-install anything — the user must explicitly choose
     // "Get Started" (local install) which handles Python/uv as a prerequisite.
     appState.set('ready')
 
-    setInterval(async () => {
-      serverInfo.set(await api.getServerInfo())
-    }, 3000)
+    serverInfo.set(await api.getServerInfo())
   })
 
   onDestroy(() => {
+    unsubscribe?.()
     if (themeMediaQuery && themeChangeHandler) {
       themeMediaQuery.removeEventListener('change', themeChangeHandler)
     }

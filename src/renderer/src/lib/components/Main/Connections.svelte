@@ -7,28 +7,25 @@
 
   import Sidebar from './Connections/Sidebar.svelte'
   import Content from './Connections/Content.svelte'
-  import StatusBar from './Connections/StatusBar.svelte'
-  import LogPanel from './Connections/LogPanel.svelte'
+  import TerminalDock from './Connections/TerminalDock.svelte'
 
   interface Props {
     onOpenSettings: () => void
-    sidebarOpen: boolean
+    sidebarOpen?: boolean
     activeConnectionName?: string
   }
 
   let {
     onOpenSettings,
-    sidebarOpen,
+    sidebarOpen = $bindable(true),
     activeConnectionName = $bindable('')
   }: Props = $props()
 
-  let showingLogs = $state(false)
 
   let url = $state('')
   let connecting = $state(false)
   let error = $state('')
   let view = $state('welcome') // welcome | install | connected
-  let autoInstall = $state(false)
   let installPhase = $state('idle') // idle | working | error
   let installError = $state('')
   let toastVisible = $state(false)
@@ -43,7 +40,10 @@
   let showAddConnectionModal = $state(false)
 
   // Active log panel
-  let activeLog = $state<'server' | 'open-terminal' | 'llama-server' | null>(null)
+  let content: Content | undefined = $state()
+  let terminalDock: TerminalDock | undefined = $state()
+  let canRefresh = $state(false)
+  let terminalInfo = $state<{ pid?: number | null; error?: string | null; external?: boolean } | null>(null)
 
   const serverStatus = $derived($serverInfo?.status)
   const serverReachable = $derived($serverInfo?.reachable)
@@ -64,6 +64,7 @@
   let openTerminalSetupStatus = $state('')
 
   const startInstall = async (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installDir?: string }) => {
+    if (installPhase === 'working') return
     installPhase = 'working'
     installError = ''
     installStatus = ''
@@ -82,14 +83,14 @@
       const disk = await window.electronAPI.getDiskSpace()
       if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
         const availableGB = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
-        throw new Error(`Not enough disk space. At least 5 GB is required (${availableGB} GB available).`)
+        throw new Error($i18n.t('error.diskSpaceDetail', { available: availableGB }))
       }
 
       // Ensure Python and uv are installed before attempting package install
       const pythonReady = await window.electronAPI.getPythonStatus()
       if (!pythonReady) {
         const pythonOk = await window.electronAPI.installPython()
-        if (!pythonOk) throw new Error('Failed to install Python. Please try again.')
+        if (!pythonOk) throw new Error($i18n.t('error.pythonInstallFailed'))
       }
 
       const ok = await window.electronAPI.installPackage()
@@ -98,10 +99,10 @@
       // Start optional services after packages are installed to avoid
       // concurrent uv installs fighting over the lockfile
       if (options?.installOpenTerminal) {
-        toggleOpenTerminal()
+        await toggleOpenTerminal()
       }
       if (options?.installLlamaCpp) {
-        toggleLlamaCpp()
+        await toggleLlamaCpp()
       }
 
       installStatus = $i18n.t('main.install.startingServer')
@@ -112,28 +113,9 @@
       await window.electronAPI.setDefaultConnection('local')
       config.set(await window.electronAPI.getConfig())
 
-      // Wait for server to actually be reachable before showing connected view
-      installStatus = $i18n.t('main.install.launchingOpenWebUI')
-      const maxWait = 120000
-      const pollInterval = 2000
-      const startTime = Date.now()
-      let reachable = false
-      while (Date.now() - startTime < maxWait) {
-        const si = await window.electronAPI.getServerInfo()
-        if (si?.reachable) {
-          reachable = true
-          break
-        }
-        await new Promise((r) => setTimeout(r, pollInterval))
-      }
-
-      if (!reachable) {
-        throw new Error('Server did not become reachable. Please try again.')
-      }
-
       // Now connect — the server is ready
       installStatus = ''
-      connect('local')
+      if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
       installPhase = 'idle'
     } catch (e: any) {
       installPhase = 'error'
@@ -181,60 +163,38 @@
     }
   }
 
-  const connect = (id: string) => {
-    showingLogs = false
-    // Toggle: clicking the active connection unselects it
-    if (activeConnectionId === id && view === 'connected') {
+  let connectRequest = 0
+  const connect = async (id: string, toggle = true): Promise<boolean> => {
+    const request = ++connectRequest
+    if (toggle && activeConnectionId === id && view === 'connected') {
       connectingId = ''
       activeConnectionId = ''
       view = 'welcome'
-      return
+      return true
     }
-    // Persist as default so spotlight/startup always use the last-selected connection
-    window.electronAPI.setDefaultConnection(id)
-    // Already-open connection — just switch to it
-    if (openConnections.has(id)) {
-      connectingId = ''
+    connectingId = id
+    error = ''
+    try {
+      await window.electronAPI.setDefaultConnection(id)
+      const result = await window.electronAPI.connectTo(id)
+      if (request !== connectRequest) return false
+      if (!result?.url) throw new Error($i18n.t('error.serverStartFailed'))
+      openConnections.set(id, result.url)
+      openConnections = new Map(openConnections)
       activeConnectionId = id
       view = 'connected'
-      return
-    }
-
-    activeConnectionId = id
-
-    if (id === 'local') {
-      // Local needs server start — use IPC (no renderer-side conn needed)
-      connectingId = id
-      view = 'welcome'
-      window.electronAPI.connectTo(id).then((result: any) => {
-        if (!result?.url) {
-          if (connectingId === id) connectingId = ''
-          return
-        }
-        if (!openConnections.has(result.connectionId)) {
-          openConnections.set(result.connectionId, result.url)
-          openConnections = new Map(openConnections)
-        }
-        if (connectingId === id) {
-          activeConnectionId = result.connectionId
-          connectingId = ''
-          if (installPhase !== 'working') {
-            view = 'connected'
-          }
-        }
-      })
-    } else {
-      const conn = ($connections ?? []).find((c) => c.id === id)
-      if (!conn) return
-      // Remote — open immediately, no IPC needed
-      connectingId = ''
-      openConnections.set(id, conn.url)
-      openConnections = new Map(openConnections)
-      view = 'connected'
+      return true
+    } catch (failure) {
+      if (request === connectRequest) error = failure instanceof Error ? failure.message : String(failure)
+      return false
+    } finally {
+      if (request === connectRequest) connectingId = ''
     }
   }
 
   const disconnect = () => {
+    connectRequest++
+    connectingId = ''
     activeConnectionId = ''
     view = 'welcome'
   }
@@ -258,70 +218,13 @@
     }
   })
 
-  // React to showingLogs from parent — open the server log panel
-  // Only react when parent sets showingLogs to true; don't close on false
-  // (the status bar manages its own open/close via activeLog)
-  $effect(() => {
-    if (showingLogs) {
-      activeLog = 'server'
-    }
-  })
-
-  // Sync back: when panel closes, tell parent
-  $effect(() => {
-    if (activeLog === null) {
-      showingLogs = false
-    }
-  })
-
   const openGithub = () => {
     settingsOpen = false
     window.electronAPI?.openInBrowser?.('https://github.com/open-webui/desktop')
   }
 
   // ── Log panel PTY helpers ─────────────────────────────
-  const getConnectPty = (log: string) => {
-    return (callback: (data: string) => void) => {
-      if (log === 'server') {
-        window.electronAPI.connectPty(callback)
-      } else if (log === 'open-terminal') {
-        window.electronAPI.connectOpenTerminalPty(callback)
-      } else if (log === 'llama-server') {
-        window.electronAPI.connectLlamaCppPty(callback)
-      }
-    }
-  }
-
-  const getDisconnectPty = (log: string) => {
-    return () => {
-      if (log === 'server') {
-        window.electronAPI.disconnectPty()
-      } else if (log === 'open-terminal') {
-        window.electronAPI?.disconnectOpenTerminalPty?.()
-      } else if (log === 'llama-server') {
-        window.electronAPI?.disconnectLlamaCppPty?.()
-      }
-    }
-  }
-
-  const getOnWrite = (log: string) => {
-    if (log === 'server') {
-      return (data: string) => window.electronAPI.writePty(data)
-    }
-    return undefined
-  }
-
-  const getOnResize = (log: string) => {
-    if (log === 'server') {
-      return (cols: number, rows: number) => window.electronAPI.resizePty(cols, rows)
-    }
-    return undefined
-  }
-
-  // ── Status bar log selection ──────────────────────────
-  const selectLog = (log: string) => {
-    activeLog = activeLog === log ? null : (log as typeof activeLog)
-  }
+  const selectLog = (log: string) => terminalDock?.select(log === 'llama-server' ? 'llamacpp' : log as 'server' | 'open-terminal')
 
   // ── Webview event delivery ─────────────────────────────
   // Single path: all events from the main process flow through here.
@@ -353,7 +256,7 @@
 
   // Listen for events from main process
   onMount(() => {
-    window.electronAPI.onData((data: any) => {
+    const unsubscribe = window.electronAPI.onData((data: any) => {
       // ── Connection opened (startup, tray click) ───────
       if (data.type === 'connection:open' && data.data?.url) {
         const connId = data.data.connectionId ?? ''
@@ -414,6 +317,8 @@
       }
 
       // ── Desktop-only state (not forwarded to webviews) ─
+      if (data.type === 'open-terminal:info') { terminalInfo = data.data; openTerminalStatus = data.data?.status; return }
+      if (data.type === 'llamacpp:info') { llamaCppInfo = data.data; llamaCppStatus = data.data?.status; return }
       if (data.type === 'status:open-terminal') { openTerminalStatus = data.data; return }
       if (data.type === 'status:open-terminal-setup') { openTerminalSetupStatus = data.data ?? ''; return }
       if (data.type === 'open-terminal:ready') { openTerminalStatus = 'started'; openTerminalSetupStatus = ''; return }
@@ -437,6 +342,8 @@
     // Auto-connect to the default connection on startup so the webview
     // is pre-loaded and ready for spotlight queries.
     window.electronAPI.getConfig().then((cfg: any) => {
+      connections.set(cfg?.connections ?? [])
+      sidebarOpen = cfg?.showSidebar !== false
       if (cfg?.defaultConnectionId && !activeConnectionId) {
         connect(cfg.defaultConnectionId)
       }
@@ -444,6 +351,7 @@
 
     // Check current Open Terminal state on mount
     window.electronAPI.getOpenTerminalInfo().then((info: any) => {
+      terminalInfo = info
       if (info?.status) {
         openTerminalStatus = info.status
       }
@@ -468,6 +376,7 @@
         llamaCppInfo = info
       }
     })
+    return () => { unsubscribe(); if (toastTimeout) clearTimeout(toastTimeout) }
   })
 
   const toggleOpenTerminal = async () => {
@@ -536,7 +445,7 @@
       />
     {/if}
 
-    <Content
+    <Content bind:this={content} bind:canRefresh
       {sidebarOpen}
       {view}
       {activeConnectionId}
@@ -545,67 +454,65 @@
       {localConn}
       {localInstalled}
       {remoteConnections}
-      bind:installPhase
-      bind:installError
-      bind:installStatus
-      bind:toastVisible
+      {installPhase}
+      {installError}
+      {installStatus}
+      {toastVisible}
       bind:url
       bind:connecting
       bind:error
       bind:showAddConnectionModal
-      bind:autoInstall
       onStartInstall={startInstall}
       onAddConnection={addConnection}
-      onSetView={(v) => { view = v }}
+      onSetView={(v) => { if (v === 'settings') onOpenSettings(); else view = v }}
+      onOpenWebUI={(id) => { void connect(id, false) }}
+      onOpenTerminal={() => selectLog('server')}
     />
   </div>
 
-  {#if activeLog}
-    <LogPanel
-      {activeLog}
-      serviceReady={activeLog === 'server'
-        ? serverStatus === 'started'
-        : activeLog === 'open-terminal'
-          ? openTerminalStatus === 'started'
-          : llamaCppStatus === 'started'}
-      statusText={activeLog === 'server'
-        ? (serverStatus === 'starting' ? 'Starting Open WebUI…' : serverStatus === 'running' && !serverReachable ? 'Waiting for server…' : installStatus || '')
-        : activeLog === 'open-terminal'
-          ? (openTerminalStatus === 'stopping' ? 'Stopping Open Terminal…' : openTerminalSetupStatus || (openTerminalStatus === 'starting' ? 'Starting Open Terminal…' : ''))
-          : (llamaCppStatus === 'stopping' ? 'Stopping llama-server…' : llamaCppSetupStatus || (llamaCppStatus === 'starting' ? 'Starting llama-server…' : llamaCppStatus === 'setting-up' ? 'Setting up llama.cpp…' : ''))}
-      connectPty={getConnectPty(activeLog)}
-      disconnectPty={getDisconnectPty(activeLog)}
-      readonly={activeLog !== 'server'}
-      onWrite={getOnWrite(activeLog)}
-      onResize={getOnResize(activeLog)}
-      onStop={activeLog === 'open-terminal' ? toggleOpenTerminal : activeLog === 'llama-server' ? toggleLlamaCpp : undefined}
-      onClose={() => { activeLog = null; showingLogs = false }}
-    />
-  {/if}
-
-  <StatusBar
-    {serverStatus}
-    {serverReachable}
-    {openTerminalStatus}
-    {llamaCppStatus}
-    openWebuiInstalled={localInstalled}
-    {openTerminalInstalled}
-    llamaCppInstalled={!!llamaCppInfo?.binaryPath}
-    {activeLog}
-    onSelectLog={selectLog}
-    onStartServer={async () => {
-      if (!localInstalled) {
-        // Not installed — trigger full install (handles Python/uv + package)
-        startInstall()
-        return
-      }
-      // Already installed — start the server
-      await window.electronAPI.startServer()
-      // Force-refresh serverInfo immediately (don't wait for 3s poll)
-      const info = await window.electronAPI.getServerInfo()
-      serverInfo.set(info)
+  <TerminalDock bind:this={terminalDock} {onOpenSettings} {sidebarOpen}
+    onToggleSidebar={() => {
+      sidebarOpen = !sidebarOpen
+      void window.electronAPI.setConfig({ showSidebar: sidebarOpen })
     }}
-    onToggleOpenTerminal={toggleOpenTerminal}
-    onToggleLlamaCpp={toggleLlamaCpp}
+    onRefresh={() => content?.refresh()} {canRefresh}
+    services={[
+      ...(localInstalled || (serverStatus && serverStatus !== 'stopped') ? [{
+        id: 'server' as const, label: $i18n.t('statusBar.server'), status: serverStatus,
+        pid: $serverInfo?.pid, browserUrl: $serverInfo?.reachable ? $serverInfo.url : undefined,
+        detail: $serverInfo?.error || installStatus,
+        runningAction: $config?.localServer?.managedBackend ? 'reconnect' as const : 'restart' as const,
+        onStart: async () => {
+          if (!localInstalled) { await startInstall(); return }
+          if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
+        },
+        onRunningAction: async () => {
+          if (!await window.electronAPI.restartServer()) throw new Error($i18n.t('error.serverRestartFailed'))
+          if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
+        }
+      }] : []),
+      ...(openTerminalInstalled || (openTerminalStatus && openTerminalStatus !== 'stopped') ? [{
+        id: 'open-terminal' as const, label: $i18n.t('sidebar.openTerminal'), status: openTerminalStatus,
+        pid: terminalInfo?.pid, detail: terminalInfo?.error || openTerminalSetupStatus,
+        runningAction: $config?.localServer?.managedBackend ? 'reconnect' as const : 'stop' as const,
+        onStart: async () => {
+          const result = await window.electronAPI.startOpenTerminal()
+          if (!result) throw new Error($i18n.t('error.terminalStartFailed'))
+        },
+        onRunningAction: async () => {
+          await window.electronAPI.stopOpenTerminal()
+          if ($config?.localServer?.managedBackend && !await window.electronAPI.startOpenTerminal()) {
+            throw new Error($i18n.t('error.terminalStartFailed'))
+          }
+        }
+      }] : []),
+      ...(llamaCppInfo?.binaryPath || (llamaCppStatus && llamaCppStatus !== 'stopped') ? [{
+        id: 'llamacpp' as const, label: $i18n.t('sidebar.llamaCpp'), status: llamaCppStatus,
+        pid: llamaCppInfo?.pid, detail: llamaCppSetupStatus,
+        runningAction: 'stop' as const,
+        onStart: async () => { if (!await window.electronAPI.startLlamaCpp()) throw new Error($i18n.t('error.serverStartFailed')) },
+        onRunningAction: () => window.electronAPI.stopLlamaCpp()
+      }] : [])
+    ]}
   />
 </div>

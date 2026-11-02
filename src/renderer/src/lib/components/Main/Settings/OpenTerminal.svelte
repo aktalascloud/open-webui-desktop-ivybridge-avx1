@@ -4,7 +4,7 @@
   import i18n from '../../../i18n'
   import Switch from '../../common/Switch.svelte'
 
-  let otInfo = $state<{ url?: string; apiKey?: string; status?: string; pid?: number } | null>(null)
+  let otInfo = $state<{ url?: string; apiKey?: string; status?: string; pid?: number; error?: string } | null>(null)
   let otApiKeyCopied = $state(false)
   let version = $state<string | null>(null)
   let stopping = $state(false)
@@ -14,6 +14,8 @@
   let loaded = $state(false)
   let uninstalling = $state(false)
   let installing = $state(false)
+  let operationError = $state('')
+  const busy = $derived(stopping || starting || restarting || updating || installing || uninstalling)
 
   onMount(async () => {
     otInfo = await window.electronAPI.getOpenTerminalInfo()
@@ -24,6 +26,7 @@
   const installed = $derived(version !== null)
 
   const isRunning = $derived(otInfo?.status === 'started')
+  const managed = $derived($config?.localServer?.managedBackend === true)
 
   const updateOtConfig = async (key: string, value: any) => {
     const current = $config ?? {}
@@ -33,53 +36,58 @@
   }
 
   const stopTerminal = async () => {
+    if (busy) return
+    operationError = ''
     stopping = true
     try {
       await window.electronAPI.stopOpenTerminal()
       otInfo = await window.electronAPI.getOpenTerminalInfo()
     } catch (e) {
-      console.error('Failed to stop Open Terminal:', e)
+      operationError = e instanceof Error ? e.message : String(e)
     }
     stopping = false
   }
 
   const startTerminal = async () => {
+    if (busy) return
+    operationError = ''
     starting = true
     try {
-      await window.electronAPI.startOpenTerminal()
+      const result = await window.electronAPI.startOpenTerminal()
       otInfo = await window.electronAPI.getOpenTerminalInfo()
+      if (!result) throw new Error(otInfo?.error || $i18n.t('error.terminalStartFailed'))
     } catch (e) {
-      console.error('Failed to start Open Terminal:', e)
+      operationError = e instanceof Error ? e.message : String(e)
     }
     starting = false
   }
 
   const restartTerminal = async () => {
+    if (busy) return
+    operationError = ''
     restarting = true
     try {
       await window.electronAPI.stopOpenTerminal()
-      await window.electronAPI.startOpenTerminal()
+      const result = await window.electronAPI.startOpenTerminal()
       otInfo = await window.electronAPI.getOpenTerminalInfo()
+      if (!result) throw new Error(otInfo?.error || $i18n.t('error.terminalStartFailed'))
     } catch (e) {
-      console.error('Failed to restart Open Terminal:', e)
+      operationError = e instanceof Error ? e.message : String(e)
     }
     restarting = false
   }
 
   const updatePackage = async () => {
+    if (busy) return
     updating = true
+    operationError = ''
     try {
-      if (isRunning) {
-        await window.electronAPI.stopOpenTerminal()
-      }
-      // Reinstall to get latest
-      await window.electronAPI.startOpenTerminal()
-      otInfo = await window.electronAPI.getOpenTerminalInfo()
+      otInfo = await window.electronAPI.updateOpenTerminal()
       version = await window.electronAPI.getPackageVersion('open-terminal')
-    } catch (e) {
-      console.error('Failed to update Open Terminal:', e)
-    }
-    updating = false
+    } catch (error) {
+      operationError = error instanceof Error ? error.message : String(error)
+      otInfo = await window.electronAPI.getOpenTerminalInfo()
+    } finally { updating = false }
   }
 
   const copyOtApiKey = async () => {
@@ -91,6 +99,8 @@
   }
 </script>
 
+{#if operationError}<p role="alert" class="text-sm text-red-600 dark:text-red-400">{operationError}</p>{/if}
+
 {#if !loaded}
   <div class="py-6 text-[12px] opacity-20 text-center">{$i18n.t('common.loading')}</div>
 {:else if !installed}
@@ -101,15 +111,14 @@
     </div>
     <button
       class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {installing ? 'pointer-events-none opacity-20' : ''}"
-      disabled={installing}
+      disabled={busy}
       onclick={async () => {
         installing = true
         try {
-          await window.electronAPI.startOpenTerminal()
-          otInfo = await window.electronAPI.getOpenTerminalInfo()
+          otInfo = await window.electronAPI.updateOpenTerminal()
           version = await window.electronAPI.getPackageVersion('open-terminal')
         } catch (e) {
-          console.error('Failed to install:', e)
+          operationError = e instanceof Error ? e.message : String(e)
         }
         installing = false
       }}
@@ -151,7 +160,7 @@
       {#if isRunning}
         <button
           class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {stopping ? 'pointer-events-none opacity-20' : ''}"
-          disabled={stopping}
+          disabled={busy}
           onclick={stopTerminal}
         >
           {#if stopping}
@@ -166,7 +175,7 @@
         </button>
         <button
           class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {restarting ? 'pointer-events-none opacity-20' : ''}"
-          disabled={restarting}
+          disabled={busy}
           onclick={restartTerminal}
         >
           {#if restarting}
@@ -176,13 +185,13 @@
             <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M20.015 4.356v4.992m0 0h-4.992m4.993 0l-3.181-3.183a8.25 8.25 0 00-13.803 3.7" />
             </svg>
-            {$i18n.t('common.restart')}
+            {$i18n.t($config?.localServer?.managedBackend ? 'common.reconnect' : 'common.restart')}
           {/if}
         </button>
       {:else}
         <button
           class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {starting ? 'pointer-events-none opacity-20' : ''}"
-          disabled={starting}
+          disabled={busy}
           onclick={startTerminal}
         >
           {#if starting}
@@ -199,7 +208,7 @@
 
       <button
         class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {updating ? 'pointer-events-none opacity-20' : ''}"
-        disabled={updating}
+        disabled={busy}
         onclick={updatePackage}
       >
         {#if updating}
@@ -301,7 +310,7 @@
           <div class="flex items-center gap-1.5">
             <span class="text-[12px] opacity-50 font-mono">{otInfo.apiKey?.slice(0, 12)}…</span>
             <button
-              class="text-[10px] opacity-30 hover:opacity-60 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]" 
+              class="text-[10px] opacity-30 hover:opacity-60 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
               onclick={copyOtApiKey}
             >
               {otApiKeyCopied ? $i18n.t('common.copied') : $i18n.t('common.copy')}
@@ -335,7 +344,8 @@
     </div>
     <button
       class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {uninstalling ? 'pointer-events-none opacity-20' : ''}"
-      disabled={uninstalling}
+      disabled={busy || managed}
+      title={managed ? $i18n.t('settings.terminal.managedPackage') : undefined}
       onclick={async () => {
         if (confirm($i18n.t('settings.terminal.uninstallConfirm'))) {
           uninstalling = true

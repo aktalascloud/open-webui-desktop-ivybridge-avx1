@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { VoiceInputSessions, isOwnedVoiceGuest, readOwnedVoiceToken, type VoiceTarget } from './voice-input-session'
 import { secureGuestWebPreferences, isConfiguredConnectionURL, isConfiguredCertificateHost } from './guest-webview'
 
 import {
@@ -6,13 +7,14 @@ import {
   net,
   shell,
   session,
+  webContents,
+  systemPreferences,
   clipboard,
   nativeImage,
+  nativeTheme,
   desktopCapturer,
-  systemPreferences,
   BrowserWindow,
   globalShortcut,
-  MessageChannelMain,
   Notification,
   Menu,
   ipcMain,
@@ -20,20 +22,16 @@ import {
   dialog
 } from 'electron'
 import path, { join } from 'path'
+import { pathToFileURL } from 'node:url'
 import { readFile, statfs } from 'fs/promises'
 
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 import {
   getLogFilePath,
-  checkUrlAndOpen,
-  clearAllServerLogs,
   getConfig,
   getUserDataPath,
   getInstallDir,
-  getServerLog,
-  getServerPIDs,
-  getServerPty,
   installPackage,
   installPython,
   isPackageInstalled,
@@ -45,30 +43,20 @@ import {
   resetApp,
   setConfig,
   startServer,
-  stopAllServers,
+  webuiService,
   uninstallPython,
   validateRemoteUrl,
-  type AppConfig,
-  type Connection
+  type Connection,
+  type AppConfig
 } from './utils'
-
-import {
-  startOpenTerminal,
-  stopOpenTerminal,
-  getOpenTerminalInfo,
-  getOpenTerminalPty,
-  getOpenTerminalLog,
-  validateOpenTerminalProcess
-} from './utils/open-terminal'
 
 import {
   setupLlamaCpp,
   startLlamaCpp,
+  llamaService,
   stopLlamaCpp,
   getLlamaCppInfo,
-  getLlamaCppLog,
-  getLlamaCppPty,
-  validateLlamaCppProcess,
+  getLlamaCppAssetName,
   checkLlamaCppUpdate,
   updateLlamaCpp,
   uninstallLlamaCpp
@@ -84,7 +72,11 @@ import {
   getRepoFiles
 } from './utils/huggingface'
 
-import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
+import { startOpenTerminal, stopOpenTerminal, getOpenTerminalInfo, terminalService, updateOpenTerminal } from './utils/open-terminal'
+
+import { attachTerminal } from './process/terminalChannel'
+
+import { initUpdater, checkForUpdates, downloadUpdate, installUpdate, getUpdateState, setAutomaticUpdates } from './updater'
 
 import log from 'electron-log'
 import { nativeText, setNativeLanguage } from './native-i18n'
@@ -95,8 +87,7 @@ import icon from '../../resources/icon.png?asset'
 import { existsSync, writeFileSync, unlinkSync } from 'fs'
 
 if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('no-sandbox')
-
+  if (process.env.FLATPAK_ID) app.setDesktopName(`${process.env.FLATPAK_ID}.desktop`)
   // Work around /dev/shm access failures in AppImage and other containerised
   // environments.  AppImage's FUSE mount can restrict child-process access to
   // /dev/shm even when --no-sandbox is set, causing FATAL crashes in the
@@ -108,26 +99,6 @@ if (process.platform === 'linux') {
   // This is required for xdg-desktop-portal features like GlobalShortcuts
   // to work (the portal is enabled by default in Chromium 134+ / Electron 33+).
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto')
-
-  // Force software GL rendering via SwiftShader.  The out-of-process GPU
-  // crashes on Ubuntu 24.04+, certain Wayland compositors, and AppArmor-
-  // restricted environments due to shared-memory allocation failures in
-  // /dev/shm or /tmp (#119, #157).
-  //
-  // --disable-gpu kills the display compositor so <webview> guest surfaces
-  // are never painted (#178).  --in-process-gpu breaks <webview> guest
-  // compositing entirely (blank webviews on all Linux).
-  //
-  // SwiftShader keeps the GPU process out-of-process (required for
-  // <webview> compositing) while using software rendering to avoid
-  // driver-level crashes.
-  app.commandLine.appendSwitch('use-gl', 'angle')
-  app.commandLine.appendSwitch('use-angle', 'swiftshader')
-
-  // Disable the GPU sandbox — the sandbox setup triggers shared-memory
-  // allocation failures in /dev/shm.  The browser process is already
-  // un-sandboxed (--no-sandbox above).
-  app.commandLine.appendSwitch('disable-gpu-sandbox')
 }
 
 // ─── GPU Crash Recovery ─────────────────────────────────
@@ -137,12 +108,22 @@ if (process.platform === 'linux') {
 // shortcut properties. On the next launch the marker is detected and
 // the switch is applied preemptively.
 
-const gpuCrashMarkerPath = join(app.getPath('userData'), '.gpu-sandbox-disabled')
-const gpuSandboxDisabled = existsSync(gpuCrashMarkerPath)
+// Retry Linux's default graphics after an Electron upgrade instead of keeping an old workaround forever.
+const gpuCrashMarkerPath = join(
+  app.getPath('userData'),
+  process.platform === 'linux' ? `.gpu-sandbox-disabled-${process.versions.electron}` : '.gpu-sandbox-disabled'
+)
+const gpuSandboxDisabled = existsSync(gpuCrashMarkerPath) || app.commandLine.hasSwitch('disable-gpu-sandbox')
 
 if (gpuSandboxDisabled) {
   log.info('GPU sandbox disabled due to previous GPU process crash')
   app.commandLine.appendSwitch('disable-gpu-sandbox')
+  // Keep webview compositing available when falling back from a Linux GPU crash.
+  if (process.platform === 'linux' && !app.commandLine.hasSwitch('use-angle')) {
+    log.info('Using software rendering after a previous GPU process crash')
+    app.commandLine.appendSwitch('use-gl', 'angle')
+    app.commandLine.appendSwitch('use-angle', 'swiftshader')
+  }
 }
 
 // Prevent Chromium from permanently blocking WebGL / 3-D APIs after
@@ -152,43 +133,50 @@ app.disableDomainBlockingFor3DAPIs()
 // ─── State ──────────────────────────────────────────────
 
 let mainWindow: BrowserWindow | null = null
-let contentWindow: BrowserWindow | null = null
 let spotlightWindow: BrowserWindow | null = null
 let voiceInputWindow: BrowserWindow | null = null
+let voiceInputRecording = false
 let tray: Tray | null = null
 let isQuiting = false
 
 let CONFIG: AppConfig | null = null
-let SERVER_URL: string | null = null
-let SERVER_STATUS: string | null = null
-let SERVER_REACHABLE = false
-let SERVER_PID: number | null = null
-let AUTH_TOKEN: string | null = null
-let voiceInputRecording = false
+
+const voiceGuests = new Map<string, number>()
+const nativeVoiceURL = () => is.dev && process.env['ELECTRON_RENDERER_URL']
+  ? `${process.env['ELECTRON_RENDERER_URL']}/voice-input.html`
+  : pathToFileURL(join(__dirname, '../renderer/voice-input.html')).href
+
+async function currentVoiceTarget(): Promise<VoiceTarget> {
+  const connection = await getDefaultConnection()
+  const guestId = connection && voiceGuests.get(connection.id)
+  if (!connection || guestId === undefined) {
+    throw new Error('Open the selected connection and sign in before using voice input.')
+  }
+  return { connectionId: connection.id, url: resolveConnectionUrl(connection).replace(/\/+$/, ''), guestId }
+}
+
+const voiceSessions = new VoiceInputSessions(async (target) => {
+  const current = await currentVoiceTarget()
+  if (current.connectionId !== target.connectionId || current.url !== target.url || current.guestId !== target.guestId) {
+    throw new Error('Voice input connection changed')
+  }
+  const token = await readOwnedVoiceToken(webContents.fromId(target.guestId) ?? undefined, target,
+    mainWindow?.webContents, session.fromPartition(`persist:connection-${target.connectionId}`))
+  const after = await currentVoiceTarget()
+  if (after.connectionId !== target.connectionId || after.url !== target.url || after.guestId !== target.guestId) {
+    throw new Error('Voice input connection changed')
+  }
+  return token
+})
+
+function requireVoiceCaller(event): void {
+  if (!voiceInputWindow || event.sender !== voiceInputWindow.webContents ||
+      event.senderFrame !== event.sender.mainFrame || event.sender.getURL() !== nativeVoiceURL()) {
+    throw new Error('Invalid voice input caller')
+  }
+}
 
 // ─── Global Shortcuts ───────────────────────────────────
-
-/**
- * Check whether the current environment supports Electron's globalShortcut
- * API.  Since Chromium 134+ (Electron 33+) the GlobalShortcutsPortal
- * feature is enabled by default, which lets `globalShortcut.register()`
- * work transparently on Wayland via `xdg-desktop-portal`.  Combined with
- * `--ozone-platform-hint=auto` (set above for Linux), shortcuts should
- * "just work" on most modern desktops.
- *
- * We only bail out when we can positively detect an environment where
- * neither X11 key-grabs nor the portal will succeed (e.g. an older
- * Flatpak base app that doesn't expose the portal D-Bus name).
- */
-function isGlobalShortcutSupported(): boolean {
-  if (process.platform !== 'linux') return true
-
-  // On Wayland the portal handles registration.  On X11 the classic
-  // key-grab path is used.  Both should work, so we optimistically
-  // return true and let tryRegisterShortcut surface per-shortcut
-  // failures via notifications.
-  return true
-}
 
 /**
  * Try to register a single global shortcut.  Returns true on success.
@@ -226,29 +214,22 @@ function tryRegisterShortcut(
   }
 }
 
+const showMainWindow = (): void => {
+  if (!mainWindow) {
+    createMainWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
 const registerShortcuts = (globalAccel?: string, spotlightAccel?: string, voiceInputAccel?: string, callAccel?: string): void => {
   globalShortcut.unregisterAll()
 
-  // On Wayland / Flatpak global shortcuts are unsupported — skip silently.
-  if (!isGlobalShortcutSupported()) {
-    log.info(
-      'Global shortcut registration skipped — unsupported environment ' +
-      `(XDG_SESSION_TYPE=${process.env['XDG_SESSION_TYPE'] ?? '(unset)'}, ` +
-      `FLATPAK_ID=${process.env['FLATPAK_ID'] ?? '(unset)'})`
-    )
-    return
-  }
-
   // Global shortcut – bring main window to foreground
   if (globalAccel) {
-    tryRegisterShortcut(globalAccel, 'Open WebUI', () => {
-      if (mainWindow) {
-        mainWindow.show()
-        mainWindow.focus()
-      } else {
-        createMainWindow()
-      }
-    })
+    tryRegisterShortcut(globalAccel, 'Open WebUI', showMainWindow)
   }
 
   // Spotlight shortcut – toggle the spotlight input bar
@@ -422,16 +403,21 @@ function createVoiceInputWindow(): BrowserWindow {
     icon: path.join(__dirname, 'assets/icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/voice-input-preload.js'),
+      partition: 'voice-input',
       sandbox: false,
       webviewTag: false,
       autoplayPolicy: 'no-user-gesture-required'
     }
   })
 
-  // Grant microphone permission for the voice input window
+  // Keep voice permission isolated from saved WebUI browser sessions.
+  const voiceInputURL = nativeVoiceURL()
   voiceInputWindow.webContents.session.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
-      callback(permission === 'media')
+    (webContents, permission, callback, details) => {
+      callback(webContents === voiceInputWindow?.webContents && permission === 'media' &&
+        details.isMainFrame && details.requestingUrl === voiceInputURL &&
+        'mediaTypes' in details && Array.isArray(details.mediaTypes) &&
+        details.mediaTypes.length > 0 && details.mediaTypes.every(type => type === 'audio'))
     }
   )
 
@@ -486,7 +472,7 @@ async function toggleVoiceInput(): Promise<void> {
     // Stop recording — chime plays in done/close handler after mic is released
     voiceInputRecording = false
     if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
-      voiceInputWindow.webContents.send('voiceInput:state', { recording: false })
+      voiceInputWindow.webContents.send('voiceInput:state', { recording: false, sessionId: voiceSessions.id })
     }
     return
   }
@@ -507,19 +493,13 @@ async function toggleVoiceInput(): Promise<void> {
     }
   }
 
-  // Pre-flight: check a connection is configured
+  let sessionId: number
   try {
-    const conn = await getDefaultConnection()
-    if (!conn) {
-      log.warn('Voice input: no connection configured')
-      new Notification({
-        title: nativeText('Voice Input'),
-        body: nativeText('No connection configured. Set up a connection in Settings before using voice input.')
-      }).show()
-      return
-    }
-  } catch (err: any) {
-    log.warn('Voice input: config check failed:', err)
+    sessionId = await voiceSessions.begin(await currentVoiceTarget())
+  } catch (error) {
+    log.warn('Voice input preflight failed:', error instanceof Error ? error.message : 'unavailable')
+    new Notification({ title: nativeText('Voice Input'), body: nativeText(error instanceof Error ? error.message : 'Voice input unavailable') }).show()
+    return
   }
 
   // Start recording — chime plays concurrently (separate audio output path from mic input)
@@ -529,14 +509,15 @@ async function toggleVoiceInput(): Promise<void> {
   if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
     voiceInputWindow.show()
     voiceInputWindow.focus()
-    voiceInputWindow.webContents.send('voiceInput:state', { recording: true })
+    voiceInputWindow.webContents.send('voiceInput:state', { recording: true, sessionId })
   } else {
     const win = createVoiceInputWindow()
     win.once('ready-to-show', () => {
+      if (voiceSessions.id !== sessionId) return
       win.show()
       win.focus()
       setTimeout(() => {
-        win.webContents.send('voiceInput:state', { recording: true })
+        if (voiceSessions.id === sessionId && !win.isDestroyed()) win.webContents.send('voiceInput:state', { recording: true, sessionId })
       }, 100)
     })
   }
@@ -573,7 +554,7 @@ async function toggleCall(): Promise<void> {
 
 const DEFAULT_WINDOW_WIDTH = 1280
 const DEFAULT_WINDOW_HEIGHT = 800
-const MIN_WINDOW_WIDTH = 480
+const MIN_WINDOW_WIDTH = 360
 const MIN_WINDOW_HEIGHT = 360
 const BOUNDS_SAVE_DEBOUNCE_MS = 500
 const MIN_VISIBLE_OVERLAP_PX = 100
@@ -628,15 +609,21 @@ function createMainWindow(show = true): void {
     minHeight: MIN_WINDOW_HEIGHT,
     icon: path.join(__dirname, 'assets/icon.png'),
     show: false,
-    titleBarStyle: process.platform === 'win32' ? 'default' : 'hidden',
+    titleBarStyle: 'hidden',
     trafficLightPosition: { x: 10, y: 10 },
     autoHideMenuBar: true,
     vibrancy: 'under-window',
     visualEffectState: 'active',
     backgroundColor: '#00000000',
-    ...(process.platform === 'win32' ? { frame: true } : {}),
     ...(process.platform === 'linux' ? { icon } : {}),
-    ...(process.platform !== 'darwin' ? { titleBarOverlay: true } : {}),
+    ...(process.platform !== 'darwin'
+      ? { titleBarOverlay: {
+          height: 32,
+          color: '#00000000',
+          symbolColor: (CONFIG?.theme === 'dark' ||
+            (CONFIG?.theme !== 'light' && nativeTheme.shouldUseDarkColors)) ? '#ffffff' : '#000000'
+        } }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -655,7 +642,8 @@ function createMainWindow(show = true): void {
   mainWindow.setIcon(icon)
 
   if (CONFIG?.windowMaximized) {
-    mainWindow.maximize()
+    // Maximizing also shows the window; wait until it is opened from the tray.
+    mainWindow.once('show', () => mainWindow?.maximize())
   }
 
   if (!app.isPackaged) {
@@ -671,6 +659,10 @@ function createMainWindow(show = true): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     openUrl(details.url)
     return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault()
+    openUrl(url)
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -703,76 +695,19 @@ function createMainWindow(show = true): void {
   })
 }
 
-function createContentWindow(url: string, connectionId: string): BrowserWindow {
-  if (contentWindow && !contentWindow.isDestroyed()) {
-    contentWindow.loadURL(url)
-    contentWindow.show()
-    return contentWindow
-  }
-
-  contentWindow = new BrowserWindow({
-    width: DEFAULT_WINDOW_WIDTH,
-    height: DEFAULT_WINDOW_HEIGHT,
-    minWidth: MIN_WINDOW_WIDTH,
-    minHeight: MIN_WINDOW_HEIGHT,
-    icon: path.join(__dirname, 'assets/icon.png'),
-    show: false,
-    titleBarStyle: process.platform === 'win32' ? 'default' : 'hidden',
-    trafficLightPosition: { x: 16, y: 16 },
-    autoHideMenuBar: true,
-    ...(process.platform === 'win32' ? { frame: true } : {}),
-    ...(process.platform === 'linux' ? { icon } : {}),
-    webPreferences: {
-      sandbox: true,
-      nodeIntegration: false,
-      contextIsolation: true,
-      partition: `persist:connection-${connectionId}`
-    }
-  })
-
-  // Enable media capture
-  session
-    .fromPartition(`persist:connection-${connectionId}`)
-    .setPermissionRequestHandler((_webContents, permission, callback) => {
-      const allowedPermissions = ['media', 'mediaKeySystem', 'notifications', 'clipboard-sanitized-write']
-      callback(allowedPermissions.includes(permission))
-    })
-
-  contentWindow.on('ready-to-show', () => {
-    contentWindow?.show()
-  })
-
-  contentWindow.webContents.setWindowOpenHandler((details) => {
-    openUrl(details.url)
-    return { action: 'deny' }
-  })
-
-  contentWindow.loadURL(url)
-
-  contentWindow.on('close', (event) => {
-    if (!isQuiting) {
-      if (CONFIG?.runInBackground === false) {
-        isQuiting = true
-        app.quit()
-      } else {
-        event.preventDefault()
-        contentWindow?.hide()
-      }
-    }
-  })
-
-  contentWindow.on('closed', () => {
-    contentWindow = null
-  })
-
-  return contentWindow
-}
-
 // ─── Tray ───────────────────────────────────────────────
 
 const updateTray = () => {
   setNativeLanguage(CONFIG?.language)
-  if (!tray || !CONFIG) return
+  if (!CONFIG) return
+  if (process.platform === 'darwin' && CONFIG.showMenuBarIcon === false) {
+    tray?.destroy(); tray = null; return
+  }
+  if (!tray) {
+    tray = new Tray(nativeImage.createFromPath(icon).resize({ width: 16, height: 16 }))
+    tray.setToolTip('Open WebUI Desktop')
+    if (process.platform === 'linux') tray.on('click', showMainWindow)
+  }
 
   // Remote connections from config
   const remoteItems = (CONFIG.connections || []).map((conn) => ({
@@ -788,7 +723,7 @@ const updateTray = () => {
   const localItem = isPackageInstalled('open-webui')
     ? [{
         label: `${CONFIG.defaultConnectionId === 'local' ? '★ ' : ''}${nativeText('Open WebUI (Local)')}`,
-        sublabel: SERVER_URL || `http://127.0.0.1:${CONFIG.localServer?.port ?? 8080}`,
+        sublabel: webuiService.info.url || `http://127.0.0.1:${CONFIG.localServer?.port ?? 8080}`,
         click: async () => {
           const result = await connectTo(buildLocalConnection())
           if (result) sendToRenderer('connection:open', result)
@@ -806,6 +741,8 @@ const updateTray = () => {
         mainWindow?.focus()
       }
     },
+    { label: nativeText('Open in Browser'), enabled: webuiService.info.reachable,
+      click: () => { if (webuiService.info.url) openUrl(webuiService.info.url) } },
     { type: 'separator' },
     ...(allItems.length > 0
       ? [
@@ -814,12 +751,12 @@ const updateTray = () => {
           { type: 'separator' }
         ]
       : []),
-    ...(SERVER_STATUS === 'started' && SERVER_URL
+    ...(webuiService.info.status === 'started' && webuiService.info.url
       ? [
           {
-            label: `${nativeText('Local')}: ${SERVER_URL}`,
+            label: `${nativeText('Local')}: ${webuiService.info.url}`,
             click: () => {
-              if (SERVER_URL) clipboard.writeText(SERVER_URL)
+              if (webuiService.info.url) clipboard.writeText(webuiService.info.url)
             }
           },
           { type: 'separator' }
@@ -828,8 +765,7 @@ const updateTray = () => {
     {
       label: nativeText('Quit Open WebUI'),
       accelerator: 'CommandOrControl+Q',
-      click: async () => {
-        await stopServerHandler()
+      click: () => {
         isQuiting = true
         app.quit()
       }
@@ -840,18 +776,13 @@ const updateTray = () => {
   tray?.setContextMenu(trayMenu)
 }
 
-// ─── Connection Management ──────────────────────────────
-
-// Build a virtual local connection object from current config.
-// The local server is never stored in the connections array — it's
-// implicit when the open-webui package is installed.
 const buildLocalConnection = (): Connection => {
   const port = CONFIG?.localServer?.port ?? 8080
   return {
     id: 'local',
     name: 'Open WebUI',
     type: 'local',
-    url: SERVER_URL || `http://127.0.0.1:${port}`
+    url: webuiService.info.url || `http://127.0.0.1:${port}`
   }
 }
 
@@ -865,11 +796,11 @@ const getDefaultConnection = async (): Promise<Connection | null> => {
   return config.connections.find((c) => c.id === config.defaultConnectionId) ?? null
 }
 
-// Resolve the URL for a connection, preferring the live SERVER_URL
+// Resolve the URL for a connection, preferring the live webuiService.info.url
 // for local connections and normalising 0.0.0.0 to localhost.
 const resolveConnectionUrl = (conn: Connection): string => {
   let url = conn.url
-  if (conn.type === 'local' && SERVER_URL) url = SERVER_URL
+  if (conn.type === 'local' && webuiService.info.url) url = webuiService.info.url
   if (url.startsWith('http://0.0.0.0')) url = url.replace('http://0.0.0.0', 'http://localhost')
   return url
 }
@@ -879,27 +810,13 @@ const connectTo = async (connection: Connection) => {
 
   if (connection.type === 'local') {
     // Start local server if needed
-    if (SERVER_STATUS !== 'started') {
+    if (webuiService.info.status !== 'started') {
       const started = await startServerHandler()
       if (!started) return null
     }
-    url = SERVER_URL || connection.url
+    url = webuiService.info.url || connection.url
 
-    // Wait for the server to actually be reachable before opening the view.
-    // startServerHandler returns as soon as the process spawns, but the HTTP
-    // endpoint might not be ready yet (especially on first launch).
-    if (!SERVER_REACHABLE) {
-      const maxWait = 120_000
-      const poll = 2_000
-      const t0 = Date.now()
-      while (!SERVER_REACHABLE && Date.now() - t0 < maxWait) {
-        await new Promise((r) => setTimeout(r, poll))
-      }
-      if (!SERVER_REACHABLE) {
-        log.warn('connectTo: server did not become reachable within timeout')
-        return null
-      }
-    }
+
   }
 
   // Normalize URL
@@ -910,240 +827,73 @@ const connectTo = async (connection: Connection) => {
   return { url, connectionId: connection.id }
 }
 
+// Open the configured local backend after readiness succeeds.
+const openLocalWebUI = async () => {
+  if (!isPackageInstalled('open-webui')) return null
+  if (!await startServerHandler()) return null
+  return { url: webuiService.info.url }
+}
+
 // ─── Server Lifecycle ───────────────────────────────────
 
-// Active PTY data listener — when a MessagePort is connected, PTY data
-// flows to the port. This disposable gets replaced on each pty:connect.
-let activePtyDataDisposable: { dispose: () => void } | null = null
+webuiService.subscribe((event) => {
+  if (event.type !== 'state') return
+  sendToRenderer('server:info', event.info)
+  sendToRenderer('status:server', event.info.status)
+  if (event.info.reachable) sendToRenderer('server:ready', { url: event.info.url })
+  updateTray()
+})
+
+let registeredLlamaUrl: string | null = null
+llamaService.subscribe((event) => {
+  if (event.type !== 'state') return
+  const info = event.info
+  sendToRenderer('llamacpp:info', getLlamaCppInfo())
+  sendToRenderer('status:llamacpp', info.status)
+  const nextUrl = info.reachable ? info.url : null
+  if (registeredLlamaUrl !== nextUrl) {
+    if (registeredLlamaUrl) sendToRenderer('connections:openai', { action: 'remove', url: `${registeredLlamaUrl}/v1` })
+    if (nextUrl) sendToRenderer('connections:openai', {
+      action: 'add', url: `${nextUrl}/v1`, config: { provider: 'llama.cpp', connection_type: 'local' }
+    })
+    registeredLlamaUrl = nextUrl
+    sendToRenderer('models:refresh')
+  }
+  if (info.reachable) sendToRenderer('llamacpp:ready', info)
+})
+
+let registeredTerminalUrl: string | null = null
+terminalService.subscribe(event => {
+  if (event.type !== 'state' || isQuiting) return
+  const info = getOpenTerminalInfo()
+  sendToRenderer('open-terminal:info', info)
+  sendToRenderer('status:open-terminal', info.status)
+  const nextUrl = info.reachable ? info.url : null
+  if (registeredTerminalUrl !== nextUrl) {
+    if (registeredTerminalUrl) sendToRenderer('connections:terminal', { action: 'remove', url: registeredTerminalUrl })
+    if (nextUrl && info.apiKey) sendToRenderer('connections:terminal', { action: 'add', url: nextUrl, key: info.apiKey })
+    registeredTerminalUrl = nextUrl
+  }
+  if (info.reachable) sendToRenderer('open-terminal:ready', info)
+})
 
 const startServerHandler = async (): Promise<boolean> => {
-  const managedConfig = await getConfig()
-  if (managedConfig.localServer?.managedBackend === true) {
-    log.debug('// CODE_MANAGED_BACKEND_V1')
-    const managedUrl = `http://127.0.0.1:${managedConfig.localServer?.port ?? 8080}`
-    const response = await net.fetch(`${managedUrl}/health`, { signal: AbortSignal.timeout(5000) }).catch(() => null)
-    if (!response?.ok || (await response.json().catch(() => null))?.status !== true) {
-      throw new Error('Managed backend is unavailable. Start it using the project launcher.')
-    }
-    SERVER_URL = managedUrl
-    SERVER_PID = null
-    SERVER_STATUS = 'started'
-    SERVER_REACHABLE = true
-    sendToRenderer('status:server', SERVER_STATUS)
-    sendToRenderer('server:ready', { url: SERVER_URL })
-    updateTray()
-    return true
-  }
-  if (SERVER_STATUS === 'starting' || SERVER_STATUS === 'started') {
-    log.info('[server] Already running or starting, skipping duplicate start')
-    return true
-  }
-  await stopServerHandler()
-  SERVER_STATUS = 'starting'
-  sendToRenderer('status:server', SERVER_STATUS)
-
+  if (isQuiting) return false
   try {
-    CONFIG = await getConfig()
-
-    // Auto-update the open-webui pip package to latest before starting.
-    // Only when autoUpdate is enabled (default) and no version pin is set.
-    const autoUpdate = CONFIG?.localServer?.autoUpdate !== false
-    const versionPin = CONFIG?.localServer?.version
-    if (autoUpdate && !versionPin && isPackageInstalled('open-webui')) {
-      try {
-        log.info('[server] Auto-updating open-webui package to latest…')
-        sendToRenderer('status:install', 'Updating Open WebUI…')
-        await installPackage('open-webui', undefined, (status: string) => {
-          sendToRenderer('status:install', status)
-        })
-        sendToRenderer('status:install', '')
-        log.info('[server] Auto-update complete')
-      } catch (e) {
-        // Non-fatal — start the existing version if upgrade fails
-        log.warn('[server] Auto-update failed, starting existing version:', e)
-        sendToRenderer('status:install', '')
-      }
-    }
-
-    const { url, pid } = await startServer(
-      CONFIG?.localServer?.serveOnLocalNetwork ?? false,
-      CONFIG?.localServer?.port ?? null
-    )
-    SERVER_URL = url
-    SERVER_PID = pid
-    SERVER_STATUS = 'started'
-    log.info('Server started:', SERVER_URL, SERVER_PID)
-    sendToRenderer('status:server', SERVER_STATUS)
-
-    // Auto-push PTY port so an already-open log panel picks up live output
-    connectPtyPort(pid)
-    updateTray()
-
-    checkUrlAndOpen(SERVER_URL, async () => {
-      SERVER_REACHABLE = true
-      sendToRenderer('server:ready', { url: SERVER_URL })
-      updateTray()
-    })
-
+    await startServer((status) => sendToRenderer('status:install', status))
     return true
   } catch (error) {
-    log.error('Failed to start server:', error)
-    SERVER_STATUS = 'failed'
-    sendToRenderer('status:server', SERVER_STATUS)
-    sendToRenderer('error', { message: `Failed to start server: ${error?.message}` })
-    updateTray()
+    if (webuiService.info.status === 'failed') {
+      log.error('Failed to start server:', error)
+      sendToRenderer('error', { message: `Failed to start server: ${error?.message}` })
+    }
     return false
   }
 }
 
-// Active PTY data listeners — one per PID, replaced on each pty:connect for that PID
-const activePtyDisposables: Map<number, { dispose: () => void }> = new Map()
-
-/**
- * Creates a MessagePort-based channel between a PTY process and the renderer.
- * Supports multiple concurrent PTYs — each identified by PID.
- *
- * Flow:
- *   PTY stdout → port1.postMessage → [transfer] → port2 (renderer) → xterm.write
- *   xterm.onData → port2.postMessage → [transfer] → port1 (main) → PTY.write
- */
-const connectPtyPort = (pid?: number): void => {
-  const targetPid = pid ?? SERVER_PID
-  if (!mainWindow) return
-
-  const { port1, port2 } = new MessageChannelMain()
-
-  if (!targetPid) {
-    if (SERVER_STATUS === 'starting') {
-      log.info('pty:connect — server is starting, no PID yet')
-    } else {
-      log.info('pty:connect — no active server')
-      port1.postMessage({ type: 'output', data: CONFIG?.localServer?.managedBackend === true ? '[Сервер работает отдельно от Desktop]\r\n' : '[Нет дочернего процесса сервера]\r\n' })
-    }
-    mainWindow.webContents.postMessage('pty:port', { pid: 0 }, [port2])
-    return
-  }
-
-  // Clean up previous connection for this PID
-  activePtyDisposables.get(targetPid)?.dispose()
-  activePtyDisposables.delete(targetPid)
-
-  const ptyProcess = getServerPty(targetPid)
-  log.info(`pty:connect — PID ${targetPid}, pty exists: ${!!ptyProcess}`)
-
-  // Replay buffered output so renderer sees full history
-  const buffer = getServerLog(targetPid)
-  if (buffer?.length) {
-    for (const chunk of buffer) {
-      port1.postMessage({ type: 'output', data: chunk })
-    }
-  }
-
-  // PTY → port1 → renderer
-  if (ptyProcess) {
-    const disposable = ptyProcess.onData((data: string) => {
-      port1.postMessage({ type: 'output', data })
-    })
-    activePtyDisposables.set(targetPid, disposable)
-
-    // Renderer → port1 → PTY (interactive input)
-    port1.on('message', (event) => {
-      const msg = event.data
-      if (msg.type === 'input') {
-        ptyProcess.write(msg.data)
-      } else if (msg.type === 'resize') {
-        ptyProcess.resize(msg.cols, msg.rows)
-      }
-    })
-    port1.start()
-  }
-
-  // Transfer port2 to the renderer
-  mainWindow.webContents.postMessage('pty:port', { pid: targetPid }, [port2])
-}
-
-/**
- * MessagePort channel for the Open Terminal PTY — read-only log viewer.
- */
-let activeOpenTerminalDisposable: { dispose: () => void } | null = null
-
-const connectOpenTerminalPtyPort = (): void => {
-  if (!mainWindow) return
-
-  const { port1, port2 } = new MessageChannelMain()
-
-  const otPty = getOpenTerminalPty()
-  if (!otPty) {
-    port1.postMessage({ type: 'output', data: '[Open Terminal is not running]\r\n' })
-    mainWindow.webContents.postMessage('open-terminal:pty:port', null, [port2])
-    return
-  }
-
-  // Clean up previous
-  activeOpenTerminalDisposable?.dispose()
-
-  // Replay log buffer
-  const buffer = getOpenTerminalLog()
-  for (const chunk of buffer) {
-    port1.postMessage({ type: 'output', data: chunk })
-  }
-
-  // Live data
-  const disposable = otPty.onData((data: string) => {
-    port1.postMessage({ type: 'output', data })
-  })
-  activeOpenTerminalDisposable = disposable
-
-  port1.start()
-  mainWindow.webContents.postMessage('open-terminal:pty:port', null, [port2])
-}
-
-/**
- * MessagePort channel for the llamacpp PTY — log viewer.
- */
-let activeLlamaCppDisposable: { dispose: () => void } | null = null
-
-const connectLlamaCppPtyPort = (): void => {
-  if (!mainWindow) return
-
-  const { port1, port2 } = new MessageChannelMain()
-
-  const lsPty = getLlamaCppPty()
-  if (!lsPty) {
-    port1.postMessage({ type: 'output', data: '[llamacpp is not running]\r\n' })
-    mainWindow.webContents.postMessage('llamacpp:pty:port', null, [port2])
-    return
-  }
-
-  // Clean up previous
-  activeLlamaCppDisposable?.dispose()
-
-  // Replay log buffer
-  const buffer = getLlamaCppLog()
-  for (const chunk of buffer) {
-    port1.postMessage({ type: 'output', data: chunk })
-  }
-
-  // Live data
-  const disposable = lsPty.onData((data: string) => {
-    port1.postMessage({ type: 'output', data })
-  })
-  activeLlamaCppDisposable = disposable
-
-  port1.start()
-  mainWindow.webContents.postMessage('llamacpp:pty:port', null, [port2])
-}
-
 const stopServerHandler = async (): Promise<boolean> => {
   try {
-    await stopAllServers()
-    if (SERVER_STATUS) {
-      SERVER_STATUS = 'stopped'
-      updateTray()
-    }
-    SERVER_REACHABLE = false
-    SERVER_URL = null
-    sendToRenderer('status:server', SERVER_STATUS)
+    await webuiService.stop()
     return true
   } catch (error) {
     log.error('Failed to stop server:', error)
@@ -1153,15 +903,7 @@ const stopServerHandler = async (): Promise<boolean> => {
 
 const resetAppHandler = async () => {
   try {
-    await stopServerHandler()
-    SERVER_STATUS = null
-    // Stop Open Terminal if running
-    try {
-      await stopOpenTerminal()
-      sendToRenderer('status:open-terminal', null)
-    } catch (e) {
-      log.warn('Failed to stop Open Terminal during reset:', e)
-    }
+    await webuiService.stop()
     // Stop and uninstall llama.cpp if running
     try {
       await uninstallLlamaCpp()
@@ -1181,6 +923,7 @@ const resetAppHandler = async () => {
     await new Promise((resolve) => setTimeout(resolve, 1000))
     await resetApp()
     CONFIG = await getConfig() // reload from defaults since config.json was deleted
+    setAutomaticUpdates(CONFIG.automaticUpdates)
     new Notification({ title: nativeText('Open WebUI'), body: nativeText('Application has been reset.') }).show()
   } catch (error) {
     log.error('Failed to reset:', error)
@@ -1193,7 +936,9 @@ const resetAppHandler = async () => {
 const sendToRenderer = (type: string, data?: any) => {
   if (type === 'status:install' && typeof data === 'string') data = nativeText(data)
   if (type === 'error' && data?.message) data = { ...data, message: nativeText(data.message) }
-  mainWindow?.webContents.send('main:data', { type, data })
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('main:data', { type, data })
+  }
 }
 
 // ─── App Lifecycle ──────────────────────────────────────
@@ -1233,8 +978,8 @@ if (!gotTheLock) {
     // ─── GPU Process Crash Recovery ──────────────────
     // If the GPU process exits fatally (e.g. sandbox init failure on
     // certain NVIDIA/Intel drivers), write a marker and relaunch with
-    // --disable-gpu-sandbox so the user doesn't have to manually edit
-    // shortcut targets (see issue #110).
+    // the saved GPU workaround (software rendering on Linux) so the user
+    // doesn't have to manually edit shortcut targets (see issue #110).
     app.on('child-process-gone', (_event, details) => {
       if (details.type === 'GPU') {
         log.error(
@@ -1282,10 +1027,37 @@ if (!gotTheLock) {
 
       // Grant media / notification permissions for webview partition sessions
       // so that auth flows, media capture, and notifications work correctly.
-      newSession.setPermissionRequestHandler((webContents, permission, callback) => {
-        const allowed = ['media', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
+      newSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        if (!isConfiguredConnectionURL(details.requestingUrl, connectionURLs()) ||
+            !isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs())) {
+          callback(false)
+          return
+        }
+        if (permission === 'fileSystem') {
+          callback(isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs()) &&
+            'fileAccessType' in details && details.fileAccessType === 'readable')
+          return
+        }
+        const allowed = ['media', 'display-capture', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
         callback(allowed.includes(permission) && isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs()))
       })
+
+      newSession.setDisplayMediaRequestHandler(
+        (request, callback) => {
+          const permitted = () => request.frame &&
+            isConfiguredConnectionURL(request.securityOrigin, connectionURLs()) &&
+            new URL(request.frame.url).origin === request.securityOrigin
+          try {
+            if (!permitted()) { callback({}); return }
+          } catch { callback({}); return }
+          desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+            try {
+              callback(permitted() && sources[0] ? { video: sources[0], audio: 'loopback' } : {})
+            } catch { callback({}) }
+          }, () => callback({}))
+        },
+        { useSystemPicker: true }
+      )
     })
 
     app.on('browser-window-created', (_, window) => {
@@ -1305,10 +1077,6 @@ if (!gotTheLock) {
 
     // Log webview guest renderer crashes for diagnostics — the existing
     // 'crashed' listener in Content.svelte surfaces these to the user.
-    //
-    // For webview guests we also intercept navigation and popup events
-    // so that external links open in the user's default browser instead
-    // of navigating the webview or spawning a new Electron window (#165).
     app.on('web-contents-created', (_event, contents) => {
       contents.on('will-attach-webview', (event, preferences, params) => {
         if (!secureGuestWebPreferences(preferences, params.src, join(__dirname, '../preload/content-preload.js'))) event.preventDefault()
@@ -1323,33 +1091,33 @@ if (!gotTheLock) {
       })
 
       if (contents.getType() === 'webview') {
-        // ── Popups (target="_blank" links) → open in default browser ──
-        contents.setWindowOpenHandler(({ url }) => {
-          openUrl(url)
-          return { action: 'deny' }
-        })
-
-        // ── In-page navigation to a different origin → open externally ──
-        // This catches regular link clicks (no target) that would navigate
-        // the webview away from the Open WebUI instance.
-        contents.on('will-navigate', (event, url) => {
-          try {
-            const currentOrigin = new URL(contents.getURL()).origin
-            const targetOrigin = new URL(url).origin
-            if (targetOrigin !== currentOrigin) {
-              event.preventDefault()
-              openUrl(url)
+        // Keep OAuth navigation and popups in their session; ordinary tabs open externally.
+        contents.setWindowOpenHandler(({ url, disposition, features }) => {
+          const isWebUrl = /^https?:\/\//i.test(url)
+          // Shift-clicking a link also requests a new window, but has no popup features.
+          if (disposition === 'new-window' && features && (isWebUrl || url === 'about:blank')) {
+            return {
+              action: 'allow',
+              overrideBrowserWindowOptions: {
+                webPreferences: {
+                  session: contents.session,
+                  nodeIntegration: false,
+                  contextIsolation: true,
+                  sandbox: true,
+                  webviewTag: false
+                }
+              }
             }
-          } catch {
-            // Malformed URL — let it through so Chromium can handle/reject it
           }
+          if (isWebUrl) openUrl(url)
+          return { action: 'deny' }
         })
 
         // ── Native right-click context menu (#161) ──────────────────
         // Electron <webview> guests don't show a context menu by default,
         // which blocks right-click → Paste / Autofill / password-manager
         // integration on login pages.  Build a native menu with standard
-        // editing actions, spell-check suggestions, and link handling.
+        // editing actions, spell-check suggestions, and link/image handling.
         contents.on('context-menu', (_event, params) => {
           const menuItems: Electron.MenuItemConstructorOptions[] = []
 
@@ -1392,6 +1160,24 @@ if (!gotTheLock) {
             // Non-editable text selection
             menuItems.push(
               { label: nativeText('Copy'), role: 'copy', enabled: params.editFlags.canCopy }
+            )
+          }
+
+          if (params.mediaType === 'image') {
+            if (menuItems.length > 0 && menuItems[menuItems.length - 1].type !== 'separator') {
+              menuItems.push({ type: 'separator' })
+            }
+            menuItems.push(
+              {
+                label: 'Copy Image',
+                enabled: params.hasImageContents,
+                click: () => contents.copyImageAt(params.x, params.y)
+              },
+              {
+                label: 'Save Image As…',
+                enabled: !!params.srcURL,
+                click: () => contents.downloadURL(params.srcURL)
+              }
             )
           }
 
@@ -1438,11 +1224,20 @@ if (!gotTheLock) {
     })
 
     ipcMain.handle('get:config', () => getConfig())
+    ipcMain.on('window:theme', (event, dark) => {
+      if (process.platform === 'darwin' || !mainWindow || mainWindow.isDestroyed()) return
+      if (event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) return
+      if (typeof dark !== 'boolean') return
+      mainWindow.setTitleBarOverlay({ symbolColor: dark ? '#ffffff' : '#000000' })
+    })
     ipcMain.handle('set:config', async (_event, config) => {
+      if ('automaticUpdates' in config && typeof config.automaticUpdates !== 'boolean') {
+        throw new Error('automaticUpdates must be a boolean')
+      }
       await setConfig(config)
       CONFIG = await getConfig()
       updateTray()
-      voiceInputRecording = false
+      setAutomaticUpdates(CONFIG.automaticUpdates)
       registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut)
     })
 
@@ -1471,30 +1266,17 @@ if (!gotTheLock) {
       try {
         CONFIG = await getConfig()
         const owuiVersion = CONFIG?.localServer?.version || undefined
-        const otVersion = CONFIG?.openTerminal?.version || undefined
 
+        await webuiService.stop()
         sendToRenderer('status:install', 'Installing Open WebUI…')
         await installPackage('open-webui', owuiVersion, (status: string) => {
           sendToRenderer('status:install', status)
         })
-        sendToRenderer('status:install', 'Installing Open Terminal…')
-        await installPackage('open-terminal', otVersion, (status: string) => {
-          sendToRenderer('status:install', status)
-        }).catch((e) =>
-          log.warn('open-terminal install failed (non-fatal):', e)
-        )
         sendToRenderer('status:package', true)
         // Notify renderer of install state change
         sendToRenderer('packages:changed', {
           'open-webui': isPackageInstalled('open-webui')
         })
-        // Auto-set local as default if no default configured
-        const cfg = await getConfig()
-        if (!cfg.defaultConnectionId) {
-          cfg.defaultConnectionId = 'local'
-          await setConfig(cfg)
-          CONFIG = cfg
-        }
         updateTray()
         return true
       } catch (error) {
@@ -1510,21 +1292,21 @@ if (!gotTheLock) {
     ipcMain.handle('server:start', () => startServerHandler())
     ipcMain.handle('server:stop', () => stopServerHandler())
     ipcMain.handle('server:restart', async () => {
-      await stopServerHandler()
+      if (!(await stopServerHandler())) return false
       return startServerHandler()
     })
-    ipcMain.handle('server:logs', () => (SERVER_PID ? getServerLog(SERVER_PID) : []))
-    ipcMain.handle('server:logs:clear', () => clearAllServerLogs())
+    ipcMain.handle('server:logs', () => [webuiService.logs])
+    ipcMain.handle('server:logs:clear', () => webuiService.clearLogs())
+    ipcMain.handle('server:info', () => webuiService.info)
 
-    // PTY MessagePort channel
-    ipcMain.handle('pty:list', () => getServerPIDs())
-    ipcMain.handle('pty:connect', (_event, pid?: number) => connectPtyPort(pid))
-    ipcMain.handle('server:info', () => ({
-      url: SERVER_URL,
-      status: SERVER_STATUS,
-      pid: SERVER_PID,
-      reachable: SERVER_REACHABLE
-    }))
+    ipcMain.on('terminal:connect', (event, serviceId: string, connectionId: number) => {
+      if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return
+      const service = serviceId === 'server' ? webuiService : serviceId === 'llamacpp' ? llamaService : serviceId === 'open-terminal' ? terminalService : null
+      if (!service || !Number.isSafeInteger(connectionId)) return
+      attachTerminal(service, event.sender, connectionId)
+    })
+
+    ipcMain.handle('server:open', () => openLocalWebUI())
 
     // Connections (remote only — local is virtual)
     ipcMain.handle('connections:list', async () => {
@@ -1597,6 +1379,7 @@ if (!gotTheLock) {
     })
 
     // Updater
+    ipcMain.handle('updater:state', () => getUpdateState())
     ipcMain.handle('updater:check', () => checkForUpdates())
     ipcMain.handle('updater:download', () => downloadUpdate())
     ipcMain.handle('updater:install', () => installUpdate())
@@ -1613,10 +1396,23 @@ if (!gotTheLock) {
       }
     })
 
-    // Auth token relay from webview
-    ipcMain.handle('app:setAuthToken', (_event, token: string) => {
-      AUTH_TOKEN = token || null
-      log.info('Auth token updated from webview')
+    // Guest registration comes only from the trusted desktop frame. It stores
+    // identity, never a token; the selected owned guest supplies current auth.
+    ipcMain.handle('connection:guest', async (event, connectionId: string, guestId: number) => {
+      if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame ||
+          typeof connectionId !== 'string' || !Number.isSafeInteger(guestId)) throw new Error('Invalid guest registration')
+      const config = await getConfig()
+      const connection = connectionId === 'local' ? buildLocalConnection()
+        : config.connections.find(item => item.id === connectionId)
+      if (!connection) throw new Error('Unknown connection')
+      const target = { connectionId, guestId, url: resolveConnectionUrl(connection) }
+      if (!isOwnedVoiceGuest(webContents.fromId(guestId) ?? undefined, target, mainWindow?.webContents,
+          session.fromPartition(`persist:connection-${connectionId}`))) throw new Error('Invalid connection guest')
+      voiceGuests.set(connectionId, guestId)
+    })
+    ipcMain.handle('connection:guest:remove', (event, connectionId: string, guestId: number) => {
+      if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return
+      if (voiceGuests.get(connectionId) === guestId) voiceGuests.delete(connectionId)
     })
 
     // Misc
@@ -1743,7 +1539,8 @@ if (!gotTheLock) {
     // ── Voice Input ─────────────────────────────────────
 
     // Check microphone permission (macOS)
-    ipcMain.handle('voiceInput:micPermission', async () => {
+    ipcMain.handle('voiceInput:micPermission', async (event) => {
+      requireVoiceCaller(event)
       if (process.platform === 'darwin') {
         const status = systemPreferences.getMediaAccessStatus('microphone')
         if (status !== 'granted') {
@@ -1756,40 +1553,13 @@ if (!gotTheLock) {
     })
 
     // Transcribe audio via the connected server's STT endpoint
-    ipcMain.handle('voiceInput:transcribe', async (_event, audioBuffer: ArrayBuffer, rendererToken?: string) => {
+    ipcMain.handle('voiceInput:transcribe', async (event, sessionId: number, audioBuffer: ArrayBuffer) => {
+      requireVoiceCaller(event)
+      if (!(audioBuffer instanceof ArrayBuffer)) {
+        throw new Error('Invalid voice input buffer')
+      }
       try {
-        const conn = await getDefaultConnection()
-        if (!conn) throw new Error('No connection configured. Set up a connection in Settings first.')
-
-        const url = resolveConnectionUrl(conn)
-
-        // Use stored auth token (relayed from webview), fall back to renderer-provided or contentWindow
-        let token = AUTH_TOKEN || rendererToken || ''
-        if (!token) {
-          // Scan all webContents to find the Open WebUI webview and read its token
-          try {
-            const { webContents: wc } = require('electron')
-            const allContents = wc.getAllWebContents()
-            for (const contents of allContents) {
-              try {
-                if (contents.getType() === 'webview' && !contents.isDestroyed()) {
-                  const t = await contents.executeJavaScript(
-                    `localStorage.getItem('token') || ''`
-                  )
-                  if (t) { token = t; break }
-                }
-              } catch {
-                // Skip inaccessible webContents
-              }
-            }
-          } catch {
-            log.warn('voiceInput:transcribe — could not extract token from webviews')
-          }
-        }
-
-        if (!token) {
-          throw new Error('Not authenticated. Open a connection and sign in before using voice input.')
-        }
+        const { token, url, signal } = await voiceSessions.claim(sessionId, await currentVoiceTarget())
 
         // Build multipart form data manually using Node.js
         const boundary = '----VoiceInput' + Date.now()
@@ -1815,18 +1585,24 @@ if (!gotTheLock) {
             'Authorization': `Bearer ${token}`,
             'Content-Type': `multipart/form-data; boundary=${boundary}`
           },
-          body
+          body, redirect: 'error', signal
         })
 
         if (!response.ok) {
-          const text = await response.text().catch(() => '')
-          throw new Error(`Transcription failed (HTTP ${response.status}). ${text || 'Check that your server has Speech-to-Text configured.'}`)
+          // Provider error bodies can contain private details; do not log/relay them.
+          throw new Error(`Transcription failed (HTTP ${response.status}). Check that your server has Speech-to-Text configured.`)
         }
 
         const result = await response.json()
-        return result
+        voiceSessions.finish(sessionId, result?.text)
+        return { text: result.text }
       } catch (error: any) {
-        log.error('voiceInput:transcribe failed:', error)
+        const wasCurrent = voiceSessions.id === sessionId
+        voiceSessions.cancel(sessionId)
+        if (!wasCurrent) throw new Error('Voice input expired')
+        voiceInputRecording = false
+        voiceInputWindow?.hide()
+        log.error('voiceInput:transcribe failed:', error instanceof Error ? error.message : 'unavailable')
         new Notification({
           title: nativeText('Voice Input Failed'),
           body: error?.message || 'Transcription failed. Check logs for details.'
@@ -1836,34 +1612,22 @@ if (!gotTheLock) {
     })
 
     // Voice input completed — deliver text to chat
-    ipcMain.handle('voiceInput:done', async (_event, text: string) => {
+    ipcMain.handle('voiceInput:done', async (event, sessionId: number) => {
+      requireVoiceCaller(event)
+      const result = await voiceSessions.deliver(sessionId, await currentVoiceTarget())
       voiceInputRecording = false
       playChime(false)
-      if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
-        voiceInputWindow.hide()
-      }
-
-      if (!text?.trim()) return
-
-      // Deliver text through the same path as Spotlight
-      const conn = await getDefaultConnection()
-      if (!conn) {
-        mainWindow?.show()
-        mainWindow?.focus()
-        return
-      }
-
-      const url = resolveConnectionUrl(conn)
-      sendToRenderer('query', { query: text.trim(), connectionId: conn.id, url })
-
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.show()
-        mainWindow.focus()
-      }
+      voiceInputWindow?.hide()
+      if (!result.text) return
+      sendToRenderer('query', { query: result.text, connectionId: result.target.connectionId, url: result.target.url })
+      showMainWindow()
     })
 
     // Voice input window requests close
-    ipcMain.handle('voiceInput:close', () => {
+    ipcMain.handle('voiceInput:close', (event, sessionId: number) => {
+      requireVoiceCaller(event)
+      if (voiceSessions.id !== sessionId) return
+      voiceSessions.cancel(sessionId)
       voiceInputRecording = false
       playChime(false)
       if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
@@ -1872,8 +1636,12 @@ if (!gotTheLock) {
     })
 
     // Voice input error
-    ipcMain.handle('voiceInput:error', (_event, message: string) => {
-      log.warn('Voice input error:', message)
+    ipcMain.handle('voiceInput:error', (event, sessionId: number, message: string) => {
+      requireVoiceCaller(event)
+      if (voiceSessions.id !== sessionId) return
+      voiceSessions.cancel(sessionId)
+      voiceInputWindow?.hide()
+      log.warn('Voice input error:', typeof message === 'string' ? message.slice(0, 1000) : 'unavailable')
       voiceInputRecording = false
       new Notification({
         title: nativeText('Voice Input Error'),
@@ -1883,136 +1651,67 @@ if (!gotTheLock) {
 
     // Open Terminal
     ipcMain.handle('open-terminal:start', async () => {
+      if (isQuiting) return null
       try {
-        sendToRenderer('status:open-terminal', 'starting')
-        const result = await startOpenTerminal(CONFIG?.openTerminal?.port ?? null, (status) => {
-          sendToRenderer('status:open-terminal-setup', status)
-        })
-        sendToRenderer('status:open-terminal', 'started')
-        sendToRenderer('open-terminal:ready', result)
-        // Notify webview to register terminal server at system level
-        sendToRenderer('connections:terminal', {
-          action: 'add',
-          url: result.url,
-          key: result.apiKey
-        })
-        return result
+        return await startOpenTerminal(null, status => sendToRenderer('status:open-terminal-setup', status))
       } catch (error) {
-        log.error('Failed to start Open Terminal:', error)
-        sendToRenderer('status:open-terminal', 'failed')
-        sendToRenderer('error', { message: `Open Terminal failed: ${error?.message}` })
+        sendToRenderer('error', { message: error instanceof Error ? error.message : 'Open Terminal failed' })
         return null
-      }
+      } finally { sendToRenderer('status:open-terminal-setup', '') }
     })
-
-    ipcMain.handle('open-terminal:stop', async () => {
+    ipcMain.handle('open-terminal:update', async () => {
+      if (isQuiting) throw new Error('Application is shutting down')
       try {
-        const info = getOpenTerminalInfo()
-        await stopOpenTerminal()
-        sendToRenderer('status:open-terminal', 'stopped')
-        // Notify webview to unregister terminal server
-        if (info.url) {
-          sendToRenderer('connections:terminal', {
-            action: 'remove',
-            url: info.url
-          })
-        }
-
-        return true
-      } catch (error) {
-        log.error('Failed to stop Open Terminal:', error)
-        return false
-      }
+        return await updateOpenTerminal(status => sendToRenderer('status:open-terminal-setup', status))
+      } finally { sendToRenderer('status:open-terminal-setup', '') }
+    })
+    ipcMain.handle('open-terminal:stop', async () => {
+      await stopOpenTerminal()
+      return true
     })
 
     ipcMain.handle('open-terminal:info', () => getOpenTerminalInfo())
     ipcMain.handle('open-terminal:status', () => isPackageInstalled('open-terminal'))
-    ipcMain.handle('open-terminal:pty:connect', () => connectOpenTerminalPtyPort())
 
     // llama.cpp
     ipcMain.handle('llamacpp:setup', async () => {
       try {
-        sendToRenderer('status:llamacpp', 'setting-up')
         const binary = await setupLlamaCpp((status) => {
           sendToRenderer('status:llamacpp-setup', status)
         })
-        sendToRenderer('status:llamacpp', 'ready')
+        sendToRenderer('llamacpp:info', getLlamaCppInfo())
         return binary
       } catch (error) {
         log.error('Failed to setup llamacpp:', error)
-        sendToRenderer('status:llamacpp', 'failed')
         sendToRenderer('error', { message: `llamacpp setup failed: ${error?.message}` })
         return null
       }
     })
 
     ipcMain.handle('llamacpp:start', async () => {
+      if (isQuiting) return null
       try {
-        sendToRenderer('status:llamacpp', 'starting')
-        const result = await startLlamaCpp((status) => {
-          sendToRenderer('status:llamacpp-setup', status)
-        })
-        sendToRenderer('status:llamacpp', 'started')
-        sendToRenderer('llamacpp:ready', result)
-        // Notify webview to register llama-server as OpenAI endpoint
-        if (result.url) {
-          sendToRenderer('connections:openai', {
-            action: 'add',
-            url: `${result.url}/v1`,
-            config: { provider: 'llama.cpp', connection_type: 'local' }
-          })
-          // Refresh model list after backend registers the endpoint
-          setTimeout(() => sendToRenderer('models:refresh'), 1000)
-        }
-
-        return result
+        return await startLlamaCpp((status) => sendToRenderer('status:llamacpp-setup', status))
       } catch (error) {
-        log.error('Failed to start llamacpp:', error)
-        sendToRenderer('status:llamacpp', 'failed')
-        sendToRenderer('error', { message: `llamacpp failed: ${error?.message}` })
+        if (llamaService.info.status === 'failed') {
+          log.error('Failed to start llamacpp:', error)
+          sendToRenderer('error', { message: `llamacpp failed: ${error?.message}` })
+        }
         return null
-      }
+      } finally { sendToRenderer('status:llamacpp-setup', '') }
     })
-
     ipcMain.handle('llamacpp:stop', async () => {
-      try {
-        const info = getLlamaCppInfo()
-        await stopLlamaCpp()
-        sendToRenderer('status:llamacpp', 'stopped')
-        // Notify webview to unregister llama-server
-        if (info.url) {
-          sendToRenderer('connections:openai', {
-            action: 'remove',
-            url: `${info.url}/v1`
-          })
-          // Refresh model list after removing endpoint
-          setTimeout(() => sendToRenderer('models:refresh'), 500)
-        }
-
-        return true
-      } catch (error) {
-        log.error('Failed to stop llamacpp:', error)
-        return false
-      }
+      await stopLlamaCpp()
+      return true
     })
-
     ipcMain.handle('llamacpp:info', () => getLlamaCppInfo())
-    ipcMain.handle('llamacpp:logs', () => getLlamaCppLog())
-    ipcMain.handle('llamacpp:pty:connect', () => connectLlamaCppPtyPort())
+    ipcMain.handle('llamacpp:asset-name', (_event, variant?: string) => getLlamaCppAssetName(variant))
+    ipcMain.handle('llamacpp:logs', () => [llamaService.logs])
 
     ipcMain.handle('llamacpp:uninstall', async () => {
       try {
-        const info = getLlamaCppInfo()
         await uninstallLlamaCpp()
-        sendToRenderer('status:llamacpp', null)
-        // Unregister OpenAI endpoint if it was running
-        if (info.url) {
-          sendToRenderer('connections:openai', {
-            action: 'remove',
-            url: `${info.url}/v1`
-          })
-          setTimeout(() => sendToRenderer('models:refresh'), 500)
-        }
+        sendToRenderer('llamacpp:info', getLlamaCppInfo())
         await setConfig({ llamaCpp: { ...CONFIG?.llamaCpp, enabled: false } })
         CONFIG = await getConfig()
         return true
@@ -2062,6 +1761,10 @@ if (!gotTheLock) {
 
     ipcMain.handle('package:version', (_event, packageName: string) => getPackageVersion(packageName))
     ipcMain.handle('package:uninstall', async (_event, packageName: string) => {
+      const config = await getConfig()
+      if (config.localServer?.managedBackend === true && ['open-webui', 'open-terminal'].includes(packageName)) {
+        throw new Error('Project-managed packages must be maintained through the project controller')
+      }
       const result = uninstallPackage(packageName)
       // Notify renderer of install state change
       sendToRenderer('packages:changed', {
@@ -2116,15 +1819,13 @@ if (!gotTheLock) {
 
     ipcMain.handle('llamacpp:update', async () => {
       try {
-        sendToRenderer('status:llamacpp', 'setting-up')
         const result = await updateLlamaCpp((status) => {
           sendToRenderer('status:llamacpp-setup', status)
         })
-        sendToRenderer('status:llamacpp', 'ready')
+        sendToRenderer('llamacpp:info', getLlamaCppInfo())
         return result
       } catch (error) {
         log.error('Failed to update llamacpp:', error)
-        sendToRenderer('status:llamacpp', 'failed')
         sendToRenderer('error', { message: `llamacpp update failed: ${error?.message}` })
         throw error
       }
@@ -2132,10 +1833,6 @@ if (!gotTheLock) {
 
     // ─── Startup ──────────────────────────────────────
 
-    // Create tray
-    const trayIcon = nativeImage.createFromPath(icon)
-    tray = new Tray(trayIcon.resize({ width: 16, height: 16 }))
-    tray.setToolTip('Open WebUI')
     updateTray()
 
 
@@ -2143,75 +1840,22 @@ if (!gotTheLock) {
     // Global shortcut
     registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut)
 
-    // Enable screen capture
-    session.defaultSession.setDisplayMediaRequestHandler(
-      (request, callback) => {
-        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-          callback({ video: sources[0], audio: 'loopback' })
-        })
-      },
-      { useSystemPicker: true }
-    )
-
-    // Validate stale PIDs from previous crash
-    validateOpenTerminalProcess()
-    validateLlamaCppProcess()
-
-    // Auto-start Open Terminal if previously enabled
-    if (CONFIG?.openTerminal?.enabled) {
-      try {
-        sendToRenderer('status:open-terminal', 'starting')
-        const result = await startOpenTerminal(CONFIG?.openTerminal?.port ?? null, (status) => {
-          sendToRenderer('status:open-terminal-setup', status)
-        })
-        sendToRenderer('status:open-terminal', 'started')
-        sendToRenderer('open-terminal:ready', result)
-      } catch (error) {
-        log.error('Auto-start Open Terminal failed:', error)
-        sendToRenderer('status:open-terminal', 'failed')
-      }
-    }
-
-    // Auto-start llama.cpp if previously enabled
+    createMainWindow(!CONFIG.startMinimized)
+    // Show startup logs immediately while the service prepares and becomes ready.
     if (CONFIG?.llamaCpp?.enabled) {
-      try {
-        sendToRenderer('status:llamacpp', 'starting')
-        const result = await startLlamaCpp((status) => {
-          sendToRenderer('status:llamacpp-setup', status)
-        })
-        sendToRenderer('status:llamacpp', 'started')
-        sendToRenderer('llamacpp:ready', result)
-      } catch (error) {
-        log.error('Auto-start llama.cpp failed:', error)
-        sendToRenderer('status:llamacpp', 'failed')
-      }
+      startLlamaCpp((status) => sendToRenderer('status:llamacpp-setup', status))
+        .catch((error) => log.error('Auto-start llama.cpp failed:', error))
+        .finally(() => sendToRenderer('status:llamacpp-setup', ''))
     }
 
-    // Migrate legacy local connection entries out of the connections array
-    if (CONFIG.connections.some((c) => c.type === 'local')) {
-      CONFIG.connections = CONFIG.connections.filter((c) => c.type !== 'local')
-      // Preserve 'local' as default if it was the default
-      if (!CONFIG.defaultConnectionId || CONFIG.defaultConnectionId === 'local') {
-        CONFIG.defaultConnectionId = 'local'
-      }
-      await setConfig(CONFIG)
-      log.info('Migrated legacy local connection entry from connections array')
-    }
-
-    // Check if already configured, auto-connect to default
-    const defaultConn = await getDefaultConnection()
-    if (defaultConn) {
-      createMainWindow()
-      const result = await connectTo(defaultConn)
-      if (result) sendToRenderer('connection:open', result)
-    } else {
-      createMainWindow()
+    if (CONFIG?.openTerminal?.enabled) {
+      startOpenTerminal(null, status => sendToRenderer('status:open-terminal-setup', status))
+        .catch(error => log.warn('Open Terminal auto-connect failed:', error instanceof Error ? error.message : 'unavailable'))
+        .finally(() => sendToRenderer('status:open-terminal-setup', ''))
     }
 
     // Initialize auto-updater
-    if (mainWindow) {
-      initUpdater(mainWindow)
-    }
+    initUpdater(sendToRenderer, CONFIG.automaticUpdates)
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
@@ -2228,22 +1872,26 @@ if (!gotTheLock) {
     }
   })
 
-  app.on('before-quit', async () => {
+  let cleanupComplete = false
+  let cleanupStarted = false
+  app.on('before-quit', (event) => {
+    if (cleanupComplete) return
+    event.preventDefault()
+    if (cleanupStarted) return
+    cleanupStarted = true
     isQuiting = true
-    await stopLlamaCpp()
-    await stopOpenTerminal()
-    await stopServerHandler()
+    voiceSessions.cancel()
+    Promise.allSettled([llamaService.shutdown(), webuiService.shutdown(), terminalService.shutdown()]).then((results) => {
+      for (const result of results) {
+        if (result.status === 'rejected') log.error('Service shutdown failed:', result.reason)
+      }
+      cleanupComplete = true
+      app.quit()
+    })
+  })
+  app.on('will-quit', () => {
     globalShortcut.unregisterAll()
     mainWindow = null
-    contentWindow = null
-    if (spotlightWindow && !spotlightWindow.isDestroyed()) {
-      spotlightWindow.destroy()
-    }
-    spotlightWindow = null
-    if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
-      voiceInputWindow.destroy()
-    }
-    voiceInputWindow = null
     tray?.destroy()
     tray = null
   })

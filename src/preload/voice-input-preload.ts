@@ -5,7 +5,7 @@ export type VoiceInputAPI = typeof api
 const api = {
   // Main process tells us to start/stop recording
   onRecordingState: (
-    callback: (data: { recording: boolean }) => void
+    callback: (data: { recording: boolean; sessionId: number }) => void
   ): void => {
     ipcRenderer.on('voiceInput:state', (_event, data) => {
       callback(data)
@@ -18,23 +18,23 @@ const api = {
   },
 
   // Send recorded audio to main process for transcription
-  transcribe: (audioBuffer: ArrayBuffer, token?: string): Promise<any> => {
-    return ipcRenderer.invoke('voiceInput:transcribe', audioBuffer, token)
+  transcribe: (sessionId: number, audioBuffer: ArrayBuffer): Promise<any> => {
+    return ipcRenderer.invoke('voiceInput:transcribe', sessionId, audioBuffer)
   },
 
   // Notify main process that transcription completed
-  done: (text: string): void => {
-    ipcRenderer.invoke('voiceInput:done', text)
+  done: (sessionId: number): Promise<void> => {
+    return ipcRenderer.invoke('voiceInput:done', sessionId)
   },
 
   // Close/hide the voice input window
-  close: (): void => {
-    ipcRenderer.invoke('voiceInput:close')
+  close: (sessionId: number): Promise<void> => {
+    return ipcRenderer.invoke('voiceInput:close', sessionId)
   },
 
   // Report an error
-  error: (message: string): void => {
-    ipcRenderer.invoke('voiceInput:error', message)
+  error: (sessionId: number, message: string): void => {
+    ipcRenderer.invoke('voiceInput:error', sessionId, message)
   }
 }
 

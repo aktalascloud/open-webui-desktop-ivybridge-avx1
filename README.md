@@ -22,3 +22,7 @@ Build.cmd build
 Use the single release package. Keep user data separate from source. Settings, endpoints and model selection are runtime configuration, not build requirements. Ivy Bridge: AVX/F16C, O3 and verified LTO, without AVX2/FMA/PGO/fast-math. Actual native flags and prebuilt components are identified in the manifest.
 
 Current checks and measurements: [.avx1/measurements/latest.json](.avx1/measurements/latest.json). CPU microbenchmarks are not LLM tokens/s. Original licenses and notices apply.
+
+Native voice input uses the selected signed-in connection. Changing its connection/account during recording prevents upload or delivery to a different account; uncertain audio submissions are never replayed.
+
+Project-managed Open Terminal reconnects through authenticated health without spawning a duplicate or replacing its key. Install the matching Terminal fork before this Desktop update; an incompatible or occupied endpoint fails closed. Standalone Desktop owns only the child it launches.

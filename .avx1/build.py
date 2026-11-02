@@ -101,7 +101,12 @@ def build_desktop(package, manifest):
     environment["CL"] = "/O2 /Ob3 /GL /arch:AVX /fp:precise"
     environment["_LINK_"] = "/LTCG"
     run("npm", "ci", "--no-audit", "--no-fund", env=environment)
-    run('node','--experimental-strip-types','--test',ROOT/'.avx1/test_desktop_security.mjs',env=environment)
+    run('node','--experimental-strip-types','--test',ROOT/'.avx1/test_desktop_security.mjs',
+        ROOT/'.avx1/managed-service.test.mjs', ROOT/'.avx1/desktop-permissions.test.mjs',
+        ROOT/'.avx1/connection-view.test.mjs', ROOT/'.avx1/voice-input-session.test.mjs',
+        ROOT/'.avx1/voice-input-ipc.test.mjs', ROOT/'.avx1/voice-input-recorder.test.mjs',
+        ROOT/'.avx1/open-terminal-lifecycle.test.mjs', ROOT/'.avx1/terminal-dock.test.mjs',
+        ROOT/'.avx1/desktop-update-policy.test.mjs', ROOT/'.avx1/package-policy.test.mjs', env=environment)
     run("npm", "audit", "--omit=dev", "--audit-level=high", env=environment)
     run("npm", "run", "build", env=environment)
     original=json.loads((ROOT/'package.json').read_text('utf-8'))['version']

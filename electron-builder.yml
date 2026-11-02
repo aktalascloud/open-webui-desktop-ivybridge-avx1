@@ -3,13 +3,10 @@ productName: Open WebUI
 directories:
   buildResources: build
 files:
-  - '!**/.vscode/*'
-  - '!src/*'
-  - '!electron.vite.config.{js,ts,mjs,cjs}'
-  - '!svelte.config.mjs'
-  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,README.md}'
-  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
-  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - out/**/*
+  - resources/**/*
+  - package.json
+  - '!**/*.{pdb,map}'
 extraResources:
   - from: .avx1/toolchains.json
     to: avx1-toolchains.json
@@ -17,9 +14,18 @@ extraResources:
     to: fork_backend.py
   - from: CHANGELOG.md
     to: CHANGELOG.md
+  - from: LICENSE
+    to: licenses/LICENSE-AGPL-3.0
+  - from: src/renderer/src/lib/assets/fonts/Vazirmatn-LICENSE.txt
+    to: licenses/Vazirmatn-LICENSE.txt
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**
+electronFuses:
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
 win:
   executableName: open-webui
 nsis:
@@ -32,6 +38,7 @@ nsis:
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+  createStartMenuShortcut: true
 mac:
   target:
     - target: dmg
@@ -70,14 +77,16 @@ linux:
 deb:
   artifactName: ${name}_${arch}.${ext}
 snap:
+  # Keep native dependencies compatible with the Linux x64 build runner.
+  base: core22
   artifactName: ${name}_${arch}.${ext}
 appImage:
   artifactName: ${name}_${arch}.${ext}
 flatpak:
   base: org.electronjs.Electron2.BaseApp
-  baseVersion: '23.08'
+  baseVersion: '25.08'
   runtime: org.freedesktop.Platform
-  runtimeVersion: '23.08'
+  runtimeVersion: '25.08'
   sdk: org.freedesktop.Sdk
   artifactName: ${name}.flatpak
   finishArgs:
