@@ -20,7 +20,7 @@ const { createHash } = require('node:crypto')
   let guestServer
   try {
     await flipFuses(inspectionExecutable, { version: FuseVersion.V1, [FuseV1Options.EnableNodeCliInspectArguments]: true })
-    app = await _electron.launch({ executablePath: inspectionExecutable, args: ['--no-sandbox', '--disable-gpu'], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
+    app = await _electron.launch({ executablePath: inspectionExecutable, args: ['--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
     await app.firstWindow()
     let page = app.windows()[0]
     for (const candidate of app.windows()) {
@@ -70,7 +70,7 @@ const { createHash } = require('node:crypto')
     })
     assert.equal(guestSurface.relay, 'function')
     assert.equal(guestSurface.node, 'undefined')
-    assert.deepEqual(guestSurface.keys, ['load','onEvent','send'])
+    assert.deepEqual(guestSurface.keys, ['onEvent','send'])
     await page.evaluate(() => document.getElementById('security-guest-fixture').remove())
     console.log('PACKAGED_GUEST_TRUST_BOUNDARY_VERIFIED')
     console.log('NSIS_RUSSIAN_ONBOARDING_RENDERED_NO_PAGE_ERRORS')

@@ -5,6 +5,29 @@ import { stripTypeScriptTypes } from 'node:module'
 import { handleGuestSend, isGuestLoadPage, isGuestPushType, canRelayDesktopEvent } from '../src/renderer/src/lib/guest-protocol.ts'
 import { secureGuestWebPreferences, isConfiguredConnectionURL, isConfiguredCertificateHost } from '../src/main/guest-webview.ts'
 
+test('actual upstream guest preload exposes only the two supported bridge methods', async () => {
+  const exposed = {}, handlers = {}, sent = []
+  const source = fs.readFileSync(new URL('../src/preload/content-preload.ts', import.meta.url), 'utf8')
+  const body = stripTypeScriptTypes(source.replace(/^import .* from 'electron'\r?\n/m, ''))
+  new Function('ipcRenderer', 'contextBridge', 'window', body)(
+    { on: (name, callback) => { handlers[name] = callback }, removeListener: () => {},
+      sendToHost: (...args) => sent.push(args) },
+    { exposeInMainWorld: (name, value) => { exposed[name] = value } },
+    { addEventListener: () => {} })
+  assert.deepEqual(Object.keys(exposed.electronAPI).sort(), ['onEvent', 'send'])
+  const events = []
+  exposed.electronAPI.onEvent(value => events.push(value))
+  handlers['desktop:event']({}, { type: 'models:refresh' })
+  assert.deepEqual(events, [{ type: 'models:refresh' }])
+  assert.deepEqual(sent.shift(), ['webview:ready'])
+  const response = exposed.electronAPI.send({ type: 'app:info' })
+  const [channel, request] = sent.shift()
+  assert.equal(channel, 'webview:send')
+  assert.equal(request.type, 'app:info')
+  handlers['desktop:response']({}, { _responseId: request._requestId, data: { version: 'fixture' } })
+  assert.deepEqual(await response, { version: 'fixture' })
+})
+
 test('untrusted guest cannot call privileged APIs, read config, replace preload or widen TLS trust', async () => {
   const calls = []
   const api = {
