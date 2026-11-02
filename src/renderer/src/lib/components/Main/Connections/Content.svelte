@@ -27,7 +27,7 @@
 <div class="content-webview-container flex-1 flex min-h-0 min-w-0 relative">
   {#each [...openConnections] as [connectionId, serverUrl] (connectionId)}
     <div class="flex-1 min-h-0 min-w-0" style:display={view === 'connected' && activeConnectionId === connectionId ? 'flex' : 'none'}>
-      <ConnectionView bind:this={views[connectionId]} bind:canRefresh={refreshable[connectionId]} {connectionId} {serverUrl} active={view === 'connected' && activeConnectionId === connectionId}
+      <ConnectionView bind:this={views[connectionId]} bind:canRefresh={() => refreshable[connectionId] ?? false, (value) => { refreshable[connectionId] = value }} {connectionId} {serverUrl} active={view === 'connected' && activeConnectionId === connectionId}
         connecting={connectingId === connectionId} launchError={error}
         {localInstalled} {installPhase} {installError} {installStatus} {toastVisible}
         {onStartInstall} {onSetView} onOpenWebUI={() => onOpenWebUI(connectionId)} {onOpenTerminal} />

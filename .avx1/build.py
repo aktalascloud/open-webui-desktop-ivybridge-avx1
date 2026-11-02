@@ -100,7 +100,10 @@ def build_desktop(package, manifest):
     # MSVC O2 is its highest standard optimization level; /fp:precise preserves numerical semantics.
     environment["CL"] = "/O2 /Ob3 /GL /arch:AVX /fp:precise"
     environment["_LINK_"] = "/LTCG"
-    run("npm", "ci", "--no-audit", "--no-fund", env=environment)
+    run("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", env=environment)
+    from desktop_native import restore
+    manifest['native_pty']=restore()
+    run(sys.executable,ROOT/'.avx1/test_desktop_native.py')
     run('node','--experimental-strip-types','--test',ROOT/'.avx1/test_desktop_security.mjs',
         ROOT/'.avx1/managed-service.test.mjs', ROOT/'.avx1/desktop-permissions.test.mjs',
         ROOT/'.avx1/connection-view.test.mjs', ROOT/'.avx1/voice-input-session.test.mjs',
@@ -115,7 +118,7 @@ def build_desktop(package, manifest):
     version=f"{major}.{minor}.{int(patch)+1}-avx1.{manifest['day']}.{os.environ.get('GITHUB_RUN_NUMBER','1')}"
     manifest['desktop_version']=version
     run("npx", "--no-install", "electron-builder", "--win", "nsis", "--x64", "--publish", "never",
-        "-c.win.signAndEditExecutable=false",'-c.extraMetadata.version='+version, env=environment)
+        "-c.win.signAndEditExecutable=false",'-c.npmRebuild=false','-c.extraMetadata.version='+version, env=environment)
     shutil.copytree(ROOT / "dist/win-unpacked", package / "desktop", ignore=shutil.ignore_patterns("*.pdb", "*.map"))
     installers=list((ROOT/'dist').glob('*-setup.exe'))
     if len(installers)!=1:raise RuntimeError('Exactly one NSIS installer is required')
@@ -132,7 +135,7 @@ def build_desktop(package, manifest):
     run('node',ROOT/'.avx1/test_desktop_ui.cjs',smoke/'open-webui.exe',WORK/'desktop-test-profile',env=ui_environment)
     manifest['installer_test']='NSIS installed in an isolated directory; app/PTY digests matched; Russian onboarding rendered without page errors'
     manifest["security"] = {"npm_runtime_audit": "passed; high/critical gate"}
-    manifest["optimization_scope"] = "node-pty rebuilt with MSVC O2/GL/LTCG/AVX; Electron/Chromium use upstream prebuilt engines"
+    manifest["optimization_scope"] = "node-pty reuses exact qualified MSVC O2/GL/LTCG/AVX binaries with source/compiler/ABI/flag/hash provenance; Electron/Chromium use upstream prebuilt engines"
     manifest["authenticode"] = "Unsigned community build"
 
 

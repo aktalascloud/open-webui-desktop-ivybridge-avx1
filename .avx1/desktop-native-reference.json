@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "repository": "aktalascloud/open-webui-desktop-ivybridge-avx1",
+  "source_commit": "73c563c5a85313ef1355a3021ab7bb9aedb5f48d",
+  "workflow_run": 41443363450,
+  "artifact_id": 13142415030,
+  "artifact_sha256": "9ecb9270b5d83c401f01a063570468383ec5c912e9a05c3e82b1701d21a475b5",
+  "artifact_bytes": 307213106,
+  "package_json_sha256": "9534af1cacb60c19a79fb64a13460c5d7028e2d175bef7e41fdabf3b2c49594c",
+  "package_lock_sha256": "e6e9cd082af1fa34c9998fac40631a006e588cd6ea879cf67a0740a1a84c388d",
+  "recipe_sha256": "899e33ccf279186683608d0325a129d4768184b9004c63601d9accb0e2292b18",
+  "compiler": "MSVC v143 14.44.35207, Windows SDK10.0.26100.0, Native64Bit",
+  "compile_flags": [
+    "/O2",
+    "/Ob3",
+    "/GL",
+    "/arch:AVX",
+    "/fp:precise"
+  ],
+  "link_flags": [
+    "/LTCG"
+  ],
+  "electron": "45.2.1",
+  "node_pty": "1.1.0",
+  "files": {
+    "conpty.node": "bca3ec002ffd66d68a105b5f64f043d8234291eb49953374b7b515b60762fc58",
+    "conpty_console_list.node": "f90f8b233872c800c6d71dab0ce8f3ec64eeab6eb664c585f4985f50738bc849",
+    "pty.node": "f6e4d440f86acef1e59069702d601e8957264df0adb91dd288fd2f420d2131d6",
+    "winpty-agent.exe": "692c507d978b10b6e78c8ea903a1e2c5d88600907547c3c7212972724b9e721c",
+    "winpty.dll": "c80ec9677dafd63191dc6698984ec3adf122d8de3ebfd75c2a3b39e590f59ed1"
+  },
+  "qualification": "NSIS digests and guest checks passed in reference CI; native PTY and installed app verified on Ivy Bridge before renderer-only repair"
+}

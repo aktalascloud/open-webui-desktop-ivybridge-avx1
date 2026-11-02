@@ -8,6 +8,7 @@ on:
         type: string
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: avx1-candidates
   cancel-in-progress: false
@@ -27,12 +28,22 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .avx1-native-cache
+          key: node-cache-ivy-${{ hashFiles('.avx1/desktop-native-reference.json') }}
       - name: Build, test, audit and package
         env:
           BUILD_CHANNEL: latest
           BUILD_DAY: ${{ inputs.day }}
+          GITHUB_TOKEN: ${{ github.token }}
 
         run: python .avx1/build.py
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && hashFiles('.avx1-native-cache/reference-complete.json') != ''
+        with:
+          path: .avx1-native-cache
+          key: node-cache-ivy-${{ hashFiles('.avx1/desktop-native-reference.json') }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: candidate-latest

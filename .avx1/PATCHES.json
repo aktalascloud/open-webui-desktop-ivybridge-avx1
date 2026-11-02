@@ -90,5 +90,11 @@
     "id": "DESK-HARDENED-PACKAGE-SMOKE",
     "description": "Preserve upstream disabled Node inspector/options and ASAR integrity fuses. Test the unmodified installed EXE through loopback Chromium CDP first; inspect main-process guest preferences only in an unshipped sibling EXE with the single inspector fuse changed. Verify original EXE digest stays unchanged.",
     "verification": "Two fuse/endpoint contract cases pass; actual packaged startup/guest verification remains mandatory in the corrected CI. Prior CI compiled and installed successfully but its old Electron-inspector harness timed out; no failed build was installed or published."
+  },
+  {
+    "id": "DESK-CONNECTION-BINDING",
+    "description": "Initialize new connection refresh bindings through a boolean getter instead of binding an undefined map entry to a bindable fallback. The previous runtime props_invalid_value exception prevented Desktop from opening WebUI and left the dock stale.",
+    "verification": "Reproduced against installed EXE in a credential-free isolated profile; corrected renderer mounted the actual WebUI guest. Real remote-connection, refresh and external Terminal reconnect regressions pass on the same Electron/IPC runtime. Packaged CI repeats these interactions.",
+    "native_scope": "Five PTY runtime binaries reused byte-for-byte from qualified source73c563c5/run41443363450; exact source/dependency/ABI/compiler/flag and binary fingerprints recorded, no native recompile."
   }
 ]
