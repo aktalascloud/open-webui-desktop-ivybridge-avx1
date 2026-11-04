@@ -331,5 +331,12 @@
   "common.reconnect": "Подключить заново",
   "connections.toggleSidebar": "Показать подключения",
   "error.terminalStartFailed": "Не удалось подключить Open Terminal. Проверьте его состояние и журнал.",
-  "settings.terminal.managedPackage": "Этот сервис управляется проектом. Для удаления используйте контроллер проекта."
+  "settings.terminal.managedPackage": "Этот сервис управляется проектом. Для удаления используйте контроллер проекта.",
+  "settings.ollama.notInstalled": "Ollama не установлена",
+  "settings.ollama.notInstalledDesc": "Загрузить и настроить Ollama для локального запуска моделей",
+  "settings.ollama.description": "Локальный запуск моделей через Ollama",
+  "settings.ollama.startOnLaunchDesc": "Автоматически запускать Ollama при открытии приложения",
+  "settings.ollama.versionDesc": "Тег релиза (latest или v0.0.0). Применяется при следующем запуске.",
+  "settings.ollama.portDesc": "Предпочтительный локальный порт. Применяется при следующем запуске.",
+  "settings.ollama.uninstallDesc": "Удалить загруженные программы Ollama. Модели Ollama будут сохранены."
 }

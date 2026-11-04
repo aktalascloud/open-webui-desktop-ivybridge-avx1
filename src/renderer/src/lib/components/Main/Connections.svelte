@@ -3,6 +3,7 @@
   import { onMount } from 'svelte'
   import { fade } from 'svelte/transition'
   import { connections, config, serverInfo } from '../../stores'
+  import type { ServiceInfo } from '../../../../../shared/terminal'
   import i18n from '../../i18n'
 
   import Sidebar from './Connections/Sidebar.svelte'
@@ -62,8 +63,10 @@
   let llamaCppInfo = $state<{ url?: string; pid?: number; binaryPath?: string } | null>(null)
   let llamaCppSetupStatus = $state('')
   let openTerminalSetupStatus = $state('')
+  let ollamaInfo = $state<(ServiceInfo & { binaryPath: string | null }) | null>(null)
+  let ollamaSetupStatus = $state('')
 
-  const startInstall = async (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installDir?: string }) => {
+  const startInstall = async (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => {
     if (installPhase === 'working') return
     installPhase = 'working'
     installError = ''
@@ -105,6 +108,7 @@
         await toggleLlamaCpp()
       }
 
+      if (options?.installOllama) await window.electronAPI.startOllama()
       installStatus = $i18n.t('main.install.startingServer')
       await window.electronAPI.startServer()
       await window.electronAPI.getServerInfo()
@@ -318,6 +322,8 @@
 
       // ── Desktop-only state (not forwarded to webviews) ─
       if (data.type === 'open-terminal:info') { terminalInfo = data.data; openTerminalStatus = data.data?.status; return }
+      if (data.type === 'ollama:info') { ollamaInfo = data.data; return }
+      if (data.type === 'status:ollama-setup') { ollamaSetupStatus = data.data ?? ''; return }
       if (data.type === 'llamacpp:info') { llamaCppInfo = data.data; llamaCppStatus = data.data?.status; return }
       if (data.type === 'status:open-terminal') { openTerminalStatus = data.data; return }
       if (data.type === 'status:open-terminal-setup') { openTerminalSetupStatus = data.data ?? ''; return }
@@ -366,6 +372,8 @@
     window.electronAPI.getPackageVersion('open-webui').then((v: string | null) => {
       localInstalled = v !== null
     })
+
+    window.electronAPI.getOllamaInfo().then((info) => { ollamaInfo = info })
 
     // Check llama-server state on mount
     window.electronAPI.getLlamaCppInfo().then((info: any) => {
@@ -512,7 +520,19 @@
         runningAction: 'stop' as const,
         onStart: async () => { if (!await window.electronAPI.startLlamaCpp()) throw new Error($i18n.t('error.serverStartFailed')) },
         onRunningAction: () => window.electronAPI.stopLlamaCpp()
-      }] : [])
+      }] : []),
+      ...(ollamaInfo?.binaryPath || (ollamaInfo?.status && ollamaInfo.status !== 'stopped')
+        ? [{
+            id: 'ollama' as const,
+            label: 'Ollama',
+            status: ollamaInfo.status,
+            pid: ollamaInfo.pid,
+            detail: ollamaInfo.error || (ollamaInfo.status === 'starting' ? ollamaSetupStatus : ''),
+            onStart: () => window.electronAPI.startOllama(),
+            runningAction: 'stop' as const,
+            onRunningAction: () => window.electronAPI.stopOllama()
+          }]
+        : [])
     ]}
   />
 </div>

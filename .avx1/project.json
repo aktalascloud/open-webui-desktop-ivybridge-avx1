@@ -7,7 +7,7 @@
   "description": "Open WebUI Desktop: Ivy Bridge AVX1/LTCG, EXE installer, optimized WebUI fork; extended Russian UI and menus / дополненный перевод интерфейса и меню на русский.",
   "repository": "aktalascloud/open-webui-desktop-ivybridge-avx1",
   "channel": "latest",
-  "upstream_commit": "38e54c7ba8266db1b14a9aaad6560f9cdf924005",
+  "upstream_commit": "f09e8015f7ffa237f4f1b99177abf42c11cc99bc",
   "stable_tag": "v0.1.4",
   "distribution": "single unified latest"
 }

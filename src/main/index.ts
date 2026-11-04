@@ -73,6 +73,7 @@ import {
 } from './utils/huggingface'
 
 import { startOpenTerminal, stopOpenTerminal, getOpenTerminalInfo, terminalService, updateOpenTerminal } from './utils/open-terminal'
+import { setupOllama, startOllama, stopOllama, shutdownOllama, ollamaService, getOllamaInfo, checkOllamaUpdate, updateOllama, uninstallOllama } from './utils/ollama'
 
 import { attachTerminal } from './process/terminalChannel'
 
@@ -877,6 +878,22 @@ terminalService.subscribe(event => {
   if (info.reachable) sendToRenderer('open-terminal:ready', info)
 })
 
+let registeredOllamaUrl: string | null = null
+ollamaService.subscribe((event) => {
+  if (event.type !== 'state') return
+  const info = event.info
+  sendToRenderer('ollama:info', getOllamaInfo())
+  const nextUrl = info.reachable ? info.url : null
+  if (registeredOllamaUrl !== nextUrl) {
+    if (registeredOllamaUrl) sendToRenderer('connections:openai', { action: 'remove', url: `${registeredOllamaUrl}/v1` })
+    if (nextUrl) sendToRenderer('connections:openai', {
+      action: 'add', url: `${nextUrl}/v1`, config: { provider: 'ollama', connection_type: 'local' }
+    })
+    registeredOllamaUrl = nextUrl
+    sendToRenderer('models:refresh')
+  }
+})
+
 const startServerHandler = async (): Promise<boolean> => {
   if (isQuiting) return false
   try {
@@ -904,6 +921,8 @@ const stopServerHandler = async (): Promise<boolean> => {
 const resetAppHandler = async () => {
   try {
     await webuiService.stop()
+    await uninstallOllama()
+    sendToRenderer('ollama:info', getOllamaInfo())
     // Stop and uninstall llama.cpp if running
     try {
       await uninstallLlamaCpp()
@@ -1301,7 +1320,7 @@ if (!gotTheLock) {
 
     ipcMain.on('terminal:connect', (event, serviceId: string, connectionId: number) => {
       if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return
-      const service = serviceId === 'server' ? webuiService : serviceId === 'llamacpp' ? llamaService : serviceId === 'open-terminal' ? terminalService : null
+      const service = serviceId === 'server' ? webuiService : serviceId === 'llamacpp' ? llamaService : serviceId === 'open-terminal' ? terminalService : serviceId === 'ollama' ? ollamaService : null
       if (!service || !Number.isSafeInteger(connectionId)) return
       attachTerminal(service, event.sender, connectionId)
     })
@@ -1721,6 +1740,30 @@ if (!gotTheLock) {
       }
     })
 
+    // Ollama
+    const ollamaOperation = async (operation: (onStatus: (status: string) => void) => Promise<unknown>) => {
+      if (isQuiting) throw new Error('Application is shutting down')
+      try {
+        return await operation((status) => sendToRenderer('status:ollama-setup', status))
+      } finally {
+        sendToRenderer('status:ollama-setup', '')
+        sendToRenderer('ollama:info', getOllamaInfo())
+      }
+    }
+    ipcMain.handle('ollama:setup', () => ollamaOperation(setupOllama))
+    ipcMain.handle('ollama:start', () => ollamaOperation(startOllama))
+    ipcMain.handle('ollama:stop', () => stopOllama())
+    ipcMain.handle('ollama:info', () => getOllamaInfo())
+    ipcMain.handle('ollama:logs', () => [ollamaService.logs])
+    ipcMain.handle('ollama:check-update', () => checkOllamaUpdate())
+    ipcMain.handle('ollama:update', () => ollamaOperation(updateOllama))
+    ipcMain.handle('ollama:uninstall', () => ollamaOperation(async () => {
+      await uninstallOllama()
+      const config = await getConfig()
+      await setConfig({ ollama: { ...config.ollama, enabled: false } })
+      CONFIG = await getConfig()
+    }))
+
     // Hugging Face models
     ipcMain.handle('huggingface:models:list', () => listModels())
     ipcMain.handle('huggingface:models:dir', () => getModelsDir())
@@ -1842,6 +1885,11 @@ if (!gotTheLock) {
 
     createMainWindow(!CONFIG.startMinimized)
     // Show startup logs immediately while the service prepares and becomes ready.
+    if (CONFIG?.ollama?.enabled) {
+      startOllama((status) => sendToRenderer('status:ollama-setup', status))
+        .catch((error) => log.error('Auto-start Ollama failed:', error))
+        .finally(() => sendToRenderer('status:ollama-setup', ''))
+    }
     if (CONFIG?.llamaCpp?.enabled) {
       startLlamaCpp((status) => sendToRenderer('status:llamacpp-setup', status))
         .catch((error) => log.error('Auto-start llama.cpp failed:', error))
@@ -1881,7 +1929,7 @@ if (!gotTheLock) {
     cleanupStarted = true
     isQuiting = true
     voiceSessions.cancel()
-    Promise.allSettled([llamaService.shutdown(), webuiService.shutdown(), terminalService.shutdown()]).then((results) => {
+    Promise.allSettled([llamaService.shutdown(), shutdownOllama(), webuiService.shutdown(), terminalService.shutdown()]).then((results) => {
       for (const result of results) {
         if (result.status === 'rejected') log.error('Service shutdown failed:', result.reason)
       }

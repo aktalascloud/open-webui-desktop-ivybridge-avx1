@@ -14,7 +14,7 @@
     remoteConnections: unknown[]; installPhase: string; installError: string;
     installStatus: string; toastVisible: boolean; url: string; connecting: boolean;
     error: string; showAddConnectionModal: boolean;
-    onStartInstall: (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installDir?: string }) => void;
+    onStartInstall: (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => void;
     onAddConnection: () => void; onSetView: (view: string) => void;
     onOpenWebUI: (id: string) => void; onOpenTerminal: () => void;
   } = $props()

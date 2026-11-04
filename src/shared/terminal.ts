@@ -1,4 +1,4 @@
-export type ServiceId = 'server' | 'llamacpp' | 'open-terminal'
+export type ServiceId = 'server' | 'llamacpp' | 'open-terminal' | 'ollama'
 export type ServiceStatus = 'starting' | 'started' | 'stopping' | 'stopped' | 'failed'
 export interface ServiceInfo {
   runId: number

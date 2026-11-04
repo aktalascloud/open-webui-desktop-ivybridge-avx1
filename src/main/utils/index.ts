@@ -791,6 +791,7 @@ export interface AppConfig {
     assetName?: string
     extraArgs: string[]
   }
+  ollama: { enabled: boolean; port: number; version: string }
   envVars: Record<string, string>
   showSidebar: boolean
   spotlightPosition: { x: number; y: number } | null
@@ -832,6 +833,7 @@ const DEFAULT_CONFIG: AppConfig = {
     variant: 'cpu',
     extraArgs: []
   },
+  ollama: { enabled: false, port: 11434, version: 'latest' },
   envVars: {},
   showSidebar: false,
   spotlightPosition: null,

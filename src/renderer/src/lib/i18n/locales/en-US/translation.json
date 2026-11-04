@@ -331,5 +331,12 @@
   "common.reconnect": "Reconnect",
   "connections.toggleSidebar": "Show connections",
   "error.terminalStartFailed": "Open Terminal could not connect. Check its status and logs.",
-  "settings.terminal.managedPackage": "This service is managed by the project. Remove it through the project controller."
+  "settings.terminal.managedPackage": "This service is managed by the project. Remove it through the project controller.",
+  "settings.ollama.notInstalled": "Ollama is not installed",
+  "settings.ollama.notInstalledDesc": "Download and set up Ollama for local model inference",
+  "settings.ollama.description": "Run models locally with Ollama",
+  "settings.ollama.startOnLaunchDesc": "Automatically start Ollama when the app opens",
+  "settings.ollama.versionDesc": "Release tag (latest or v0.0.0). Applies on next start.",
+  "settings.ollama.portDesc": "Preferred local port. Applies on next start.",
+  "settings.ollama.uninstallDesc": "Remove downloaded Ollama binaries. Your Ollama models are kept."
 }

@@ -19,6 +19,7 @@ function fixture(connectionId = 'local', serverUrl = 'http://127.0.0.1:8080') {
   let address = serverUrl
   const api = {
     getOpenTerminalInfo: async () => { calls.push('terminal'); return { status: 'started', url: 'http://127.0.0.1:39284', apiKey: 'synthetic' } },
+    getOllamaInfo: async () => ({ reachable: true, url: 'http://127.0.0.1:11434' }),
     getLlamaCppInfo: async () => ({ reachable: true, url: 'http://127.0.0.1:18881' }),
     getAppInfo: async () => ({ version: 'fixture', platform: 'win32', username: 'private' }),
     getVersion: async () => 'fixture',
@@ -71,9 +72,11 @@ test('local capability replay never reads private Terminal state for remote gues
   const local = fixture()
   await local.ipc('webview:ready')
   assert.deepEqual(local.calls, ['terminal'])
-  assert.equal(local.sent.length, 2)
+  assert.equal(local.sent.length, 3)
   assert.equal(local.sent[0].data.type, 'connections:terminal')
   assert.equal(local.sent[0].data.data.key, 'synthetic')
+  assert.equal(local.sent[2].data.data.config.provider, 'ollama')
+  assert.equal(local.sent[2].data.data.url, 'http://127.0.0.1:11434/v1')
 })
 
 test('navigation during an awaited capability read or API response blocks later delivery', async () => {
