@@ -6,6 +6,8 @@ Unofficial fork with reviewed agent/MCP fixes and extended Russian UI. One lates
 
 [Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
 
+Mainstream Ollama controls are optional and disabled by default. Independent managed WebUI/Terminal, per-connection guest isolation and the corrected Refresh binding remain; exact qualified AVX/LTCG PTY binaries are reused.
+
 ## Build
 
 Requires Python 3.12+, Git and GitHub CLI for CI. No LLM, model weights or Codex dependency.

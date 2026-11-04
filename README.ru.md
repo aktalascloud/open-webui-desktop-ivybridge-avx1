@@ -6,6 +6,8 @@
 
 [Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
 
+Управление Ollama из mainstream добавлено как необязательная возможность, по умолчанию отключённая. Сохранены независимые WebUI/Terminal, изоляция вкладок и исправление Refresh; переиспользуются точные проверенные AVX/LTCG-библиотеки PTY.
+
 ## Сборка
 
 Нужны Python 3.12+, Git и GitHub CLI для CI. Сборка не зависит от модели, её весов или Codex.
