@@ -1,10 +1,11 @@
 {
   "schema": 1,
+  "grouping_version": 2,
   "ownership": "applied-downstream-only",
   "project": "desktop",
   "upstream": "f09e8015f7ffa237f4f1b99177abf42c11cc99bc",
-  "snapshot_source": "bb508b0fc2a65c8394049568b34173b3c9db5c80",
-  "downstream_tree_without_patches": "966e41bbe1c7d15ebbf5c4edabfd332e3e548f99",
+  "snapshot_source": "11e410186c494e44f51fba3911df418cab1796d4",
+  "downstream_tree_without_patches": "df82e510842ed022edf5a976b132b1539b94a4cb",
   "groups": [
     {
       "patch": "01-runtime.patch",
@@ -14,7 +15,6 @@
         ".prettierignore",
         ".prettierrc.yaml",
         "CONTRIBUTOR_LICENSE_AGREEMENT",
-        "LICENSE",
         "build/com.openwebui.open-webui.metainfo.xml",
         "build/entitlements.mac.plist",
         "dev-app-update.yml",
@@ -22,7 +22,6 @@
         "electron.vite.config.ts",
         "entitlements.plist",
         "eslint.config.mjs",
-        "package-lock.json",
         "package.json",
         "resources/sounds/chime-start.wav",
         "resources/sounds/chime-stop.wav",
@@ -90,7 +89,7 @@
         "tsconfig.node.json",
         "tsconfig.web.json"
       ],
-      "sha256": "456d56a947f7d9392f41e91cd64570c52e13164f50cc9322adc220249e612151"
+      "sha256": "f398ddcdb8a7d7b13b4e836d04800263feb51d7939538deb6c4a015fa3f4a7ea"
     },
     {
       "patch": "02-build.patch",
@@ -115,9 +114,10 @@
         ".gitattributes",
         ".github/workflows/avx1-build.yml",
         ".gitignore",
-        "Build.cmd"
+        "Build.cmd",
+        "package-lock.json"
       ],
-      "sha256": "9d2b2cc05a4b18d17ee6b4c24c19582c0253025d5e595c895ad1af50a59cd99e"
+      "sha256": "6b62bf820562f735380bdfc6423bc20f526814d4e1bb1995d1f81f3ae3381145"
     },
     {
       "patch": "03-tests.patch",
@@ -151,19 +151,20 @@
       "paths": [
         ".avx1/measurements/latest.json",
         ".github/pull_request_template.md",
+        "LICENSE",
         "README.md",
         "README.ru.md"
       ],
-      "sha256": "93ae7a9aabaa88a9bea66862677bf93920531d4e34f296ed7192bf5fac79c0c7"
+      "sha256": "87227ad5c180ca7a4cdf2ba58382398e16934a64c0e2f38c345760d6da1661c1"
     }
   ],
   "files": {
-    "01-runtime.patch": "456d56a947f7d9392f41e91cd64570c52e13164f50cc9322adc220249e612151",
-    "02-build.patch": "9d2b2cc05a4b18d17ee6b4c24c19582c0253025d5e595c895ad1af50a59cd99e",
+    "01-runtime.patch": "f398ddcdb8a7d7b13b4e836d04800263feb51d7939538deb6c4a015fa3f4a7ea",
+    "02-build.patch": "6b62bf820562f735380bdfc6423bc20f526814d4e1bb1995d1f81f3ae3381145",
     "03-tests.patch": "d3e7842bc30a5541f03dd2ee89e158fa11f046ebdd956a44cc7e1333a08ec7b9",
-    "04-documentation.patch": "93ae7a9aabaa88a9bea66862677bf93920531d4e34f296ed7192bf5fac79c0c7",
+    "04-documentation.patch": "87227ad5c180ca7a4cdf2ba58382398e16934a64c0e2f38c345760d6da1661c1",
     ".gitattributes": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da",
     "series": "0de3cc8bf7284c341fd9a7217a5cc598d813b5a95bdebb6584f9a9c790128ada",
-    "README.md": "62a089cc2d015ae04a0190dc5d035d61985964c920e7be366d030b6a1b07a3e0"
+    "README.md": "18754bbf72b883838bf2760924ccc34f2efcadae814be1407f5e81b3882997d1"
   }
 }
