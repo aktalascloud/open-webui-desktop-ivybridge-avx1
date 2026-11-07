@@ -30,3 +30,5 @@ Native voice input uses the selected signed-in connection. Changing its connecti
 Project-managed Open Terminal reconnects through authenticated health without spawning a duplicate or replacing its key. Install the matching Terminal fork before this Desktop update; an incompatible or occupied endpoint fails closed. Standalone Desktop owns only the child it launches.
 
 Connection startup now supplies a defined refresh binding; packaged checks open an actual guest, enable Refresh, and reconnect an independently owned Terminal. Native PTY binaries are reused byte-for-byte from the qualified source/compiler/ABI/flag/hash reference in `.avx1/desktop-native-reference.json`. For a cold local cache, restore its five exact files from the last qualified package or matching installation before building; unchanged native sources do not need recompilation.
+
+Applied maintainer-only patches, excluding mainstream commits: [patches](patches/README.md).
