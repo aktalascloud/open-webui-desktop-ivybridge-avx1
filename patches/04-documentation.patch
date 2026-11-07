@@ -1,0 +1,192 @@
+diff --git a/.avx1/measurements/latest.json b/.avx1/measurements/latest.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec7d706c59b1e5ca4e80887250c21aaf1fe686da
+--- /dev/null
++++ b/.avx1/measurements/latest.json
+@@ -0,0 +1,11 @@
++{
++  "scope": "current selected checks; final package and deployment receipts are recorded after CI",
++  "inference_speedup_percent": null,
++  "model_required_for_build": false,
++  "memory_fixture": {
++    "input_utf8_bytes": 200000,
++    "retained_payload_limit_bytes": 1024,
++    "invalid_utf8_replacement": false,
++    "scope": "synthetic OutputBuffer test; not CPU/inference throughput"
++  }
++}
+diff --git a/.github/pull_request_template.md b/.github/pull_request_template.md
+index 92431941d2471d37eeba9b9b1f3e6427c6f23ffb..3bcb0afc054ed3981f5498c7e2ba3daf1bb57868 100644
+--- a/.github/pull_request_template.md
++++ b/.github/pull_request_template.md
+@@ -1,24 +1,24 @@
+-## Description
+-
+-<!-- Describe your changes in detail. What problem does this solve? -->
+-
+-## Related Issues
+-
+-<!-- Link any related issues: Fixes #123, Closes #456 -->
+-
+----
+-
+-## Contributor License Agreement
+-
+-<!--
+-🚨 DO NOT DELETE THE TEXT BELOW 🚨
+-Keep the "Contributor License Agreement" confirmation text intact.
+-Deleting it will trigger the CLA-Bot to INVALIDATE your PR.
+-
+-Your PR will NOT be reviewed or merged until you check the box below confirming that you have read and agree to the terms of the CLA.
+--->
+-
+-- [ ] By submitting this pull request, I confirm that I have read and fully agree to the [Contributor License Agreement (CLA)](https://github.com/open-webui/desktop/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT), and I am providing my contributions under its terms.
+-
+-> [!NOTE]
+-> Deleting the CLA section will lead to immediate closure of your PR and it will not be merged in.
++## Description
++
++<!-- Describe your changes in detail. What problem does this solve? -->
++
++## Related Issues
++
++<!-- Link any related issues: Fixes #123, Closes #456 -->
++
++---
++
++## Contributor License Agreement
++
++<!--
++🚨 DO NOT DELETE THE TEXT BELOW 🚨
++Keep the "Contributor License Agreement" confirmation text intact.
++Deleting it will trigger the CLA-Bot to INVALIDATE your PR.
++
++Your PR will NOT be reviewed or merged until you check the box below confirming that you have read and agree to the terms of the CLA.
++-->
++
++- [ ] By submitting this pull request, I confirm that I have read and fully agree to the [Contributor License Agreement (CLA)](https://github.com/open-webui/desktop/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT), and I am providing my contributions under its terms.
++
++> [!NOTE]
++> Deleting the CLA section will lead to immediate closure of your PR and it will not be merged in.
+diff --git a/README.md b/README.md
+index 1972384b48d4037e6f52a67d9d27ac006dd95a32..595113c61cc733fe265e22caec7beb8bcd3d76a0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,58 +1,34 @@
+-# Open WebUI Desktop
++# Open WebUI Desktop AVX1
+ 
+-[![Version](https://img.shields.io/github/v/release/open-webui/desktop?label=version&color=%2331c48d)](https://github.com/open-webui/desktop/releases)
+-[![Downloads](https://img.shields.io/github/downloads/open-webui/desktop/total?color=%23764abc)](https://github.com/open-webui/desktop/releases)
+-[![Discord](https://img.shields.io/discord/1170866489302188073?label=discord&color=%235865F2)](https://discord.gg/open-webui)
+-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
++[Русский](README.ru.md)
+ 
+-![Open WebUI Desktop](./demo.png)
++Unofficial fork with reviewed agent/MCP fixes and extended Russian UI. One latest NSIS EXE.
+ 
+-[Open WebUI](https://github.com/open-webui/open-webui), up and running in a few clicks. Desktop installs it on your computer, keeps it up to date, and opens it whenever you need it.
++[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
+ 
+-## Download
++Mainstream Ollama controls are optional and disabled by default. Independent managed WebUI/Terminal, per-connection guest isolation and the corrected Refresh binding remain; exact qualified AVX/LTCG PTY binaries are reused.
+ 
+-- **macOS:** [Apple Silicon](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64.dmg) · [Intel](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64.dmg)
+-- **Windows:** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64-setup.exe) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64-setup.exe)
+-- **Linux (Debian / Ubuntu / Mint):** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui_amd64.deb) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.deb)
+-- **Linux (AppImage):** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui_x86_64.AppImage) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.AppImage)
++## Build
+ 
+-If an AppImage fails to start with a `chrome-sandbox` error on Debian, Ubuntu, or Linux Mint, install the `.deb` package above. Its installer configures the sandbox permissions needed to start the app.
++Requires Python 3.12+, Git and GitHub CLI for CI. No LLM, model weights or Codex dependency.
+ 
+-Snap and Flatpak packages are available on the [releases page](https://github.com/open-webui/desktop/releases).
+-
+-Internet is required for installation and updates.
+-
+-Enable **Automatic desktop updates** in **Settings → About** to update on quit.
+-
+-## How It Works
+-
+-Open the app and click **Get Started**. Desktop installs Open WebUI on your computer, starts it for you, and opens it in the app. You use the same Open WebUI you know, with setup and updates handled through Desktop.
+-
+-Desktop runs your own local copy of Open WebUI. If you already use Open WebUI on another server, [Open WebUI Tether](https://github.com/open-webui/tether) is a companion app that extends what you can do with it.
+-
+-## System Requirements
++```cmd
++Build.cmd status
++Build.cmd build
++```
+ 
+-| | Requirements |
+-|--|-------------|
+-| **Disk** | 5 GB+ |
+-| **OS** | macOS 12+, Windows 10+, modern Linux (glibc 2.28+) |
++`build` verifies the clean published commit and dispatches the pinned workflow. For a prepared local compiler/SDK environment: `Build.cmd local`. Dependencies, flags, tests and license gates are in `.avx1/`; lockfiles and source history are retained. Signing keys stay outside the repository.
+ 
+-## Privacy
++## Run and verify
+ 
+-Desktop does not collect usage data. If you connect Open WebUI to an external AI provider, that provider's privacy policy applies.
++Use the single release package. Keep user data separate from source. Settings, endpoints and model selection are runtime configuration, not build requirements. Ivy Bridge: AVX/F16C, O3 and verified LTO, without AVX2/FMA/PGO/fast-math. Actual native flags and prebuilt components are identified in the manifest.
+ 
+-## Community
++Current checks and measurements: [.avx1/measurements/latest.json](.avx1/measurements/latest.json). CPU microbenchmarks are not LLM tokens/s. Original licenses and notices apply.
+ 
+-- 💬 [Discord](https://discord.gg/open-webui) - Come hang out
+-- 🐛 [Issues](https://github.com/open-webui/desktop/issues) - Report bugs or request features
+-- 🌐 [Open WebUI](https://github.com/open-webui/open-webui) - The main project
+-- 📖 [Docs](https://docs.openwebui.com) - Full documentation
++Native voice input uses the selected signed-in connection. Changing its connection/account during recording prevents upload or delivery to a different account; uncertain audio submissions are never replayed.
+ 
+-## Contributing
++Project-managed Open Terminal reconnects through authenticated health without spawning a duplicate or replacing its key. Install the matching Terminal fork before this Desktop update; an incompatible or occupied endpoint fails closed. Standalone Desktop owns only the child it launches.
+ 
+-```bash
+-npm install
+-npm run dev
+-```
++Connection startup now supplies a defined refresh binding; packaged checks open an actual guest, enable Refresh, and reconnect an independently owned Terminal. Native PTY binaries are reused byte-for-byte from the qualified source/compiler/ABI/flag/hash reference in `.avx1/desktop-native-reference.json`. For a cold local cache, restore its five exact files from the last qualified package or matching installation before building; unchanged native sources do not need recompilation.
+ 
+-See [CHANGELOG.md](CHANGELOG.md) for release history. Licensed under [AGPL-3.0](LICENSE).
++Applied maintainer-only patches, excluding mainstream commits: [patches](patches/README.md).
+diff --git a/README.ru.md b/README.ru.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9288537823a3f298b7c0a3ba67e298bc5cec514
+--- /dev/null
++++ b/README.ru.md
+@@ -0,0 +1,34 @@
++# Open WebUI Desktop AVX1
++
++[English](README.md)
++
++Неофициальный форк: проверенные исправления для агентов/MCP и дополненный русский интерфейс. Один актуальный NSIS EXE.
++
++[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
++
++Управление Ollama из mainstream добавлено как необязательная возможность, по умолчанию отключённая. Сохранены независимые WebUI/Terminal, изоляция вкладок и исправление Refresh; переиспользуются точные проверенные AVX/LTCG-библиотеки PTY.
++
++## Сборка
++
++Нужны Python 3.12+, Git и GitHub CLI для CI. Сборка не зависит от модели, её весов или Codex.
++
++```cmd
++Build.cmd status
++Build.cmd build
++```
++
++`build` проверяет чистоту опубликованного коммита и запускает закреплённый workflow. При готовом локальном компиляторе/SDK: `Build.cmd local`. Зависимости, флаги, тесты и проверки лицензий — в `.avx1/`. Lockfiles и история исходников сохранены. Ключи подписи в репозиторий не входят.
++
++## Установка и проверки
++
++Используйте единственный пакет релиза. Пользовательские данные храните отдельно от исходников. Адреса серверов и выбор моделей задаются настройками, а не требованиями сборки. Ivy Bridge: AVX/F16C, O3 и проверенный LTO, без AVX2/FMA/PGO/fast-math. Реальные флаги и prebuilt-компоненты указаны в манифесте.
++
++Последние проверки и замеры: [.avx1/measurements/latest.json](.avx1/measurements/latest.json). Микрозамеры CPU не означают скорость LLM. Исходные лицензии и уведомления сохранены.
++
++Нативный голосовой ввод использует выбранное подключение с выполненным входом. Смена подключения или аккаунта во время записи блокирует отправку или доставку в другой аккаунт; неопределённые отправки аудио не повторяются.
++
++В режиме проекта Open Terminal подключается через авторизованную проверку здоровья: без дубля процесса и замены ключа. Перед обновлением Desktop установите совместимый форк Terminal; несовместимый или занятый endpoint не запускает обходной экземпляр. Самостоятельный Desktop управляет только своим дочерним процессом.
++
++При открытии подключения refresh-binding теперь всегда определён; проверка пакета открывает настоящий guest, включает «Обновить» и переподключает независимый Terminal. Нативный PTY переиспользуется побайтно по проверенному source/compiler/ABI/flags/hash reference в `.avx1/desktop-native-reference.json`. Для пустого локального кэша сначала восстановите его пять точных файлов из последнего проверенного пакета или совпадающей установки; неизменённые native-исходники пересобирать не нужно.
++
++Только применённые нами патчи, без изменений самого mainstream: [patches](patches/README.md).
