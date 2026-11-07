@@ -4,7 +4,7 @@
 
 Unofficial fork with reviewed agent/MCP fixes and extended Russian UI. One latest NSIS EXE.
 
-[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
+[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](patches/README.md)
 
 Mainstream Ollama controls are optional and disabled by default. Independent managed WebUI/Terminal, per-connection guest isolation and the corrected Refresh binding remain; exact qualified AVX/LTCG PTY binaries are reused.
 

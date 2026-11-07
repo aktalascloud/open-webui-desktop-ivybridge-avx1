@@ -4,7 +4,7 @@
 
 Неофициальный форк: проверенные исправления для агентов/MCP и дополненный русский интерфейс. Один актуальный NSIS EXE.
 
-[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](.avx1/PATCHES.json)
+[Upstream](https://github.com/open-webui/desktop) · [Release](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Patches](patches/README.md)
 
 Управление Ollama из mainstream добавлено как необязательная возможность, по умолчанию отключённая. Сохранены независимые WebUI/Terminal, изоляция вкладок и исправление Refresh; переиспользуются точные проверенные AVX/LTCG-библиотеки PTY.
 
