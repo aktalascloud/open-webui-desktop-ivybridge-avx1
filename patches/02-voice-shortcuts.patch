@@ -1,0 +1,1785 @@
+diff --git a/.avx1/voice-input-ipc.test.mjs b/.avx1/voice-input-ipc.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..243e3a8de5072f5909097a31afd8ba349a60a693
+--- /dev/null
++++ b/.avx1/voice-input-ipc.test.mjs
+@@ -0,0 +1,130 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++import ts from 'typescript'
++import { VoiceInputSessions, isOwnedVoiceGuest } from '../src/main/voice-input-session.ts'
++
++const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8')
++const tree = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true)
++const callbacks = new Map()
++let requireCaller
++function visit(node) {
++  if (ts.isFunctionDeclaration(node) && node.name?.text === 'requireVoiceCaller') requireCaller = node.getText(tree)
++  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'ipcMain.handle' &&
++      ts.isStringLiteral(node.arguments[0])) callbacks.set(node.arguments[0].text, node.arguments[1].getText(tree))
++  ts.forEachChild(node, visit)
++}
++visit(tree)
++assert.ok(requireCaller)
++
++function fixture() {
++  const voice = { mainFrame: {}, getURL: () => 'file:///app/voice-input.html' }
++  const target = { connectionId: 'local', url: 'http://127.0.0.1:8080', guestId: 7 }
++  let current = { ...target }, token = 'synthetic-A'
++  const posts = [], events = []
++  const sessions = new VoiceInputSessions(async () => token)
++  const runtime = {
++    voiceSessions: sessions,
++    voiceInputWindow: { webContents: voice, hide() {} },
++    voiceInputRecording: true,
++    nativeVoiceURL: () => 'file:///app/voice-input.html',
++    currentVoiceTarget: async () => ({ ...current }),
++    fetch: async (url, options) => {
++      posts.push({ url, options })
++      return { ok: true, json: async () => ({ text: 'server transcript' }) }
++    },
++    Buffer,
++    Notification: class { show() {} }, nativeText: value => value,
++    log: { error() {} }, playChime() {}, showMainWindow() {},
++    sendToRenderer: (type, data) => events.push({ type, data })
++  }
++  runtime.requireVoiceCaller = new Function('runtime', `with (runtime) { ${stripTypeScriptTypes(requireCaller)}; return requireVoiceCaller }`)(runtime)
++  function callback(name) {
++    const body = callbacks.get(name)
++    assert.ok(body, name)
++    return new Function('runtime', `with (runtime) { return (${stripTypeScriptTypes(body)}) }`)(runtime)
++  }
++  return { runtime, sessions, posts, events, target,
++    event: { sender: voice, senderFrame: voice.mainFrame }, callback,
++    select: value => { current = { ...target, ...value } },
++    token: value => { token = value } }
++}
++
++test('real IPC posts once to the captured target and delivers only the server result', async () => {
++  const f = fixture()
++  const id = await f.sessions.begin(f.target)
++  const result = await f.callback('voiceInput:transcribe')(f.event, id, new ArrayBuffer(16))
++  assert.deepEqual(result, { text: 'server transcript' })
++  assert.equal(f.posts.length, 1)
++  assert.equal(f.posts[0].url, 'http://127.0.0.1:8080/api/v1/audio/transcriptions')
++  assert.equal(f.posts[0].options.redirect, 'error')
++  assert.equal(f.posts[0].options.headers.Authorization, 'Bearer synthetic-A')
++  await f.callback('voiceInput:done')(f.event, id, 'renderer-forged transcript')
++  assert.deepEqual(f.events, [{ type: 'query', data: { query: 'server transcript', connectionId: 'local', url: f.target.url } }])
++  await assert.rejects(f.callback('voiceInput:transcribe')(f.event, id, new ArrayBuffer(16)))
++  assert.equal(f.posts.length, 1)
++})
++
++test('real IPC rejects other frames and invalid buffers before any network call', async () => {
++  const f = fixture()
++  const id = await f.sessions.begin(f.target)
++  await assert.rejects(f.callback('voiceInput:transcribe')({ ...f.event, senderFrame: {} }, id, new ArrayBuffer(16)), /caller/)
++  await assert.rejects(f.callback('voiceInput:transcribe')(f.event, id, { byteLength: 16 }), /buffer/)
++  assert.equal(f.posts.length, 0)
++  assert.equal(f.sessions.id, id)
++})
++
++test('connection selection changes prevent upload and transcript delivery to the new account', async () => {
++  const f = fixture()
++  let id = await f.sessions.begin(f.target)
++  f.select({ connectionId: 'remote', url: 'https://other.invalid', guestId: 8 })
++  await assert.rejects(f.callback('voiceInput:transcribe')(f.event, id, new ArrayBuffer(16)), /connection changed/)
++  assert.equal(f.posts.length, 0)
++  f.select({})
++  id = await f.sessions.begin(f.target)
++  await f.callback('voiceInput:transcribe')(f.event, id, new ArrayBuffer(16))
++  f.select({ connectionId: 'remote', url: 'https://other.invalid', guestId: 8 })
++  await assert.rejects(f.callback('voiceInput:done')(f.event, id), /connection changed/)
++  assert.deepEqual(f.events, [])
++})
++
++test('uncertain transport failure cannot be submitted again and stale close cannot cancel a newer recording', async () => {
++  const f = fixture()
++  f.runtime.fetch = async () => { f.posts.push('uncertain'); throw Error('synthetic transport failure') }
++  const first = await f.sessions.begin(f.target)
++  await assert.rejects(f.callback('voiceInput:transcribe')(f.event, first, new ArrayBuffer(16)))
++  await assert.rejects(f.callback('voiceInput:transcribe')(f.event, first, new ArrayBuffer(16)))
++  assert.equal(f.posts.length, 1)
++  const second = await f.sessions.begin(f.target)
++  f.callback('voiceInput:close')(f.event, first)
++  assert.equal(f.sessions.id, second)
++})
++
++test('guest registry accepts only configured guests owned by the trusted main frame and its partition', async () => {
++  const f = fixture()
++  const owner = { mainFrame: {} }, partition = {}, other = {}
++  const guest = { id: 7, hostWebContents: owner, session: partition,
++    getType: () => 'webview', isDestroyed: () => false, getURL: () => f.target.url }
++  Object.assign(f.runtime, {
++    mainWindow: { webContents: owner }, voiceGuests: new Map(),
++    getConfig: async () => ({ connections: [] }),
++    buildLocalConnection: () => ({ id: 'local', url: f.target.url }),
++    resolveConnectionUrl: connection => connection.url,
++    webContents: { fromId: id => id === 7 ? guest : undefined },
++    session: { fromPartition: value => value === 'persist:connection-local' ? partition : other },
++    isOwnedVoiceGuest
++  })
++  const event = { sender: owner, senderFrame: owner.mainFrame }
++  const register = f.callback('connection:guest')
++  await assert.rejects(register({ ...event, senderFrame: {} }, 'local', 7), /registration/)
++  await assert.rejects(register(event, 'unknown', 7), /Unknown connection/)
++  await register(event, 'local', 7)
++  assert.equal(f.runtime.voiceGuests.get('local'), 7)
++  guest.session = other
++  await assert.rejects(register(event, 'local', 7), /Invalid connection guest/)
++  f.callback('connection:guest:remove')(event, 'local', 8)
++  assert.equal(f.runtime.voiceGuests.get('local'), 7)
++  f.callback('connection:guest:remove')(event, 'local', 7)
++  assert.equal(f.runtime.voiceGuests.size, 0)
++})
+diff --git a/.avx1/voice-input-recorder.test.mjs b/.avx1/voice-input-recorder.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d71e1a8ce8195d349384d6697c72d0b2476549c
+--- /dev/null
++++ b/.avx1/voice-input-recorder.test.mjs
+@@ -0,0 +1,80 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++
++const component = readFileSync(new URL('../src/renderer/src/components/VoiceInput.svelte', import.meta.url), 'utf8')
++const script = stripTypeScriptTypes(component.slice(component.indexOf('>') + 1, component.indexOf('</script>'))
++  .replace(/^\s*import .* from 'svelte'\s*$/m, ''))
++
++function stream() {
++  let stopped = 0
++  return { getTracks: () => [{ stop: () => stopped++ }], stopped: () => stopped }
++}
++function fixture(getUserMedia) {
++  const calls = [], recorders = []
++  let interval
++  const api = { checkMicPermission: async () => 'granted',
++    transcribe: async id => { calls.push(['transcribe', id]); return { text: 'synthetic' } },
++    done: async id => { calls.push(['done', id]) }, close: async id => { calls.push(['close', id]) },
++    error: (...args) => calls.push(['error', ...args]), onRecordingState() {} }
++  class Recorder {
++    static isTypeSupported() { return true }
++    constructor(input, options) { this.stream = input; this.mimeType = options.mimeType; this.state = 'inactive'; recorders.push(this) }
++    start() { this.state = 'recording' }
++    stop() { this.state = 'inactive'; this.onstop?.() }
++    emit() { this.ondataavailable({ data: new Blob([new Uint8Array(8192)]) }) }
++  }
++  class Context {
++    createAnalyser() { return { frequencyBinCount: 2, getByteFrequencyData() {} } }
++    createMediaStreamSource() { return { connect() {} } }
++    close() { return Promise.resolve() }
++  }
++  const run = new Function('window', 'navigator', '$state', 'onMount', 'onDestroy', 'MediaRecorder',
++    'AudioContext', 'requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', `
++    ${script}; return {startRecording, stopRecording, cancelRecording, state: () => ({sessionId, recording, transcribing})};
++  `)({ voiceInputAPI: api }, { mediaDevices: { getUserMedia } }, value => value, () => {}, () => {}, Recorder,
++    Context, () => 1, () => {}, callback => { callback(); return 1 }, () => {},
++    callback => { interval = callback; return 1 }, () => { interval = undefined })
++  return { ...run, api, calls, recorders, tick: () => interval?.() }
++}
++
++test('cancel before delayed microphone grant stops the acquired stream without creating a recorder', async () => {
++  let grant
++  const audio = stream()
++  const f = fixture(() => new Promise(resolve => { grant = resolve }))
++  const pending = f.startRecording(1)
++  for (let i = 0; i < 5; i++) await Promise.resolve()
++  assert.equal(typeof grant, 'function')
++  f.cancelRecording()
++  grant(audio)
++  await pending
++  assert.equal(audio.stopped(), 1)
++  assert.equal(f.recorders.length, 0)
++  assert.deepEqual(f.calls, [['close', 1]])
++})
++
++test('late transcription cannot deliver text or close a newer recording', async () => {
++  const firstAudio = stream(), secondAudio = stream()
++  let captures = 0, finish, submitted
++  const submission = new Promise(resolve => { submitted = resolve })
++  const f = fixture(async () => ++captures === 1 ? firstAudio : secondAudio)
++  f.api.transcribe = async id => {
++    f.calls.push(['transcribe', id])
++    submitted()
++    return new Promise(resolve => { finish = resolve })
++  }
++  await f.startRecording(1)
++  f.recorders[0].emit()
++  f.tick()
++  const pending = f.stopRecording()
++  await submission
++  await f.startRecording(2)
++  finish({ text: 'late private transcript' })
++  await pending
++  assert.deepEqual(f.calls, [['transcribe', 1]])
++  assert.equal(f.state().sessionId, 2)
++  assert.equal(f.state().recording, true)
++  assert.ok(firstAudio.stopped() > 0)
++  assert.equal(secondAudio.stopped(), 0)
++})
+diff --git a/.avx1/voice-input-session.test.mjs b/.avx1/voice-input-session.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..052079ca80e1783299de26b914e1b06079274111
+--- /dev/null
++++ b/.avx1/voice-input-session.test.mjs
+@@ -0,0 +1,113 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { VoiceInputSessions, readOwnedVoiceToken, isOwnedVoiceGuest } from '../src/main/voice-input-session.ts'
++
++const target = { connectionId: 'local', url: 'http://127.0.0.1:8080', guestId: 7 }
++function guestFixture() {
++  const host = {}, partition = {}
++  let url = target.url, token = 'synthetic-A', reads = 0
++  const guest = { id: 7, isDestroyed: () => false, getType: () => 'webview', getURL: () => url,
++    hostWebContents: host, session: partition,
++    executeJavaScript: async source => {
++      assert.equal(source, "localStorage.getItem('token') || ''")
++      reads++
++      return token
++    } }
++  return { guest, host, partition, navigate: value => { url = value }, token: value => { token = value }, reads: () => reads }
++}
++
++test('only the exact owned guest, partition and origin can supply the token', async () => {
++  const f = guestFixture()
++  assert.equal(await readOwnedVoiceToken(f.guest, target, f.host, f.partition), 'synthetic-A')
++  for (const overrides of [{ id: 8 }, { hostWebContents: {} }, { session: {} }, { getType: () => 'window' },
++    { isDestroyed: () => true }, { getURL: () => 'https://other.invalid' }]) {
++    assert.equal(isOwnedVoiceGuest({ ...f.guest, ...overrides }, target, f.host, f.partition), false)
++  }
++  assert.equal(isOwnedVoiceGuest(f.guest, { ...target, url: 'http://user:password@127.0.0.1:8080' }, f.host, f.partition), false)
++  assert.equal(f.reads(), 1)
++})
++
++test('redirect while reading storage rejects the result', async () => {
++  const f = guestFixture()
++  f.guest.executeJavaScript = async () => { f.navigate('https://other.invalid'); return 'synthetic-A' }
++  await assert.rejects(readOwnedVoiceToken(f.guest, target, f.host, f.partition), /changed/)
++})
++
++test('empty or malformed current token never falls back to another browser context', async () => {
++  const f = guestFixture()
++  for (const value of ['', null, { token: 'synthetic' }, 'x'.repeat(16385)]) {
++    f.token(value)
++    await assert.rejects(readOwnedVoiceToken(f.guest, target, f.host, f.partition), /Not authenticated/)
++  }
++  assert.equal(f.reads(), 4)
++})
++
++test('one captured account gets one submission and one server-result delivery', async () => {
++  const sessions = new VoiceInputSessions(async () => 'synthetic-A')
++  const id = await sessions.begin(target)
++  const claim = await sessions.claim(id, target)
++  assert.equal(claim.url, target.url)
++  assert.equal(claim.token, 'synthetic-A')
++  await assert.rejects(sessions.claim(id, target), /already submitted/)
++  sessions.finish(id, '  transcript  ')
++  assert.deepEqual(await sessions.deliver(id, target), { target, text: 'transcript' })
++  assert.equal(claim.signal.aborted, true)
++  await assert.rejects(sessions.deliver(id, target), /changed/)
++})
++
++test('changed connection, guest or base path rejects before upload', async () => {
++  for (const change of [{ connectionId: 'remote' }, { guestId: 8 }, { url: target.url + '/other' }]) {
++    const sessions = new VoiceInputSessions(async () => 'synthetic-A')
++    const id = await sessions.begin(target)
++    await assert.rejects(sessions.claim(id, { ...target, ...change }), /connection changed/)
++  }
++})
++
++test('switching the signed-in account rejects both upload and later delivery', async () => {
++  let token = 'synthetic-A'
++  const sessions = new VoiceInputSessions(async () => token)
++  let id = await sessions.begin(target)
++  token = 'synthetic-B'
++  await assert.rejects(sessions.claim(id, target), /account changed/)
++  token = 'synthetic-A'
++  id = await sessions.begin(target)
++  await sessions.claim(id, target)
++  sessions.finish(id, 'private transcript')
++  token = 'synthetic-B'
++  await assert.rejects(sessions.deliver(id, target), /account changed/)
++})
++
++test('a superseded recording aborts its request and stale completion cannot affect the new recording', async () => {
++  const sessions = new VoiceInputSessions(async () => 'synthetic-A')
++  const first = await sessions.begin(target)
++  const claim = await sessions.claim(first, target)
++  const second = await sessions.begin(target)
++  assert.equal(claim.signal.aborted, true)
++  assert.throws(() => sessions.finish(first, 'late'), /expired/)
++  sessions.cancel(first)
++  assert.equal(sessions.id, second)
++  assert.equal((await sessions.claim(second, target)).signal.aborted, false)
++})
++
++test('simultaneous transcription claims reserve before awaiting token lookup', async () => {
++  let reads = 0, finish
++  const sessions = new VoiceInputSessions(async () => {
++    if (++reads === 1) return 'synthetic-A'
++    return new Promise(resolve => { finish = resolve })
++  })
++  const id = await sessions.begin(target)
++  const pending = sessions.claim(id, target)
++  await assert.rejects(sessions.claim(id, target), /already submitted/)
++  finish('synthetic-A')
++  await pending
++})
++
++test('cancel during token lookup invalidates a pending recording start', async () => {
++  let finish
++  const sessions = new VoiceInputSessions(() => new Promise(resolve => { finish = resolve }))
++  const pending = sessions.begin(target)
++  sessions.cancel()
++  finish('synthetic-A')
++  await assert.rejects(pending, /superseded/)
++  assert.equal(sessions.id, undefined)
++})
+diff --git a/resources/sounds/chime-start.wav b/resources/sounds/chime-start.wav
+new file mode 100644
+index 0000000000000000000000000000000000000000..33d03428a1f363619b412236c2bf4d94ade19600
+GIT binary patch
+literal 16360
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/resources/sounds/chime-stop.wav b/resources/sounds/chime-stop.wav
+new file mode 100644
+index 0000000000000000000000000000000000000000..0cb930f66289db61dc12b5928786b164a761d0ba
+GIT binary patch
+literal 16360
+zcmeI3g_jh`+U6tDGb>BFaCi3^U~qSLclUt?1{mC32baNpaCdiin8Bg3p}Nb`CH95+
+z?%wa)J^KgjIk)3fcXmoxMrOtPJilmGw^ps!l@V%PwN=et1BYb~AcQca8h;=(qYXwB
+z3ZNcchjl#(=ls8ZzMcQ?^slqX_aB$I#QC0V^54_9eJ-5wtuzYJh(Rpkk$^-bLGt`p
+z`nD~?ein{nMBo~e=tLng5+NxhM81;0$rng}!&Wj0lPDZB;4BPRh{%V6C@so}vY_lJ
+zC(4C#L&}A6psXkpN(aYe#6e{Z$n7inKwgtS$s=-)+$J~44M;c19rA!YB`--599N*W
+zJW7Dva-qVgBr1=pqME1<st2hKY*j&JQ3;d}%1VH;4Y=YJTz!R{BnQY&vYD(Sze8F_
+zHo<=f$SHE2Jb^M*!a+^)qcW&AYKgj{0caTd6^%vX&=@oV{fv5`){y&8C=cXnlaJ&+
+zIStpZAT!ArGKBOcJxO=?^e4l}M6!TvAV;9~AD~Y&pdV2KxcXN#53NOipd;uMIs>00
+zu>CulgML9BQ8mbwN1w<wvV+VeLrFVQlawU+NH&t0WFfgpF;a!JB!kFoIDQNII}Iv_
+zI-!YZJvxn^q7ZVBfW278EY{HnbQ|qQ3!(lspl`$E5?KlLt4|6LiA3BN?j83kq&x0&
+zH|%;yA<~5WO144|h>+(1v<h8C5tIi1i0k7HxEJn?yW-}!BF>I&bRTU*gW)U+U4s_3
+zC3%VJ-gLLQv)vJHKex9#z#Z)_a`(B<T%MFC!^wWA=?^Fo?L}WvPRL~}UW<?7tN1p)
+zj!)o?cp`3vbK@^)2kM2gp(kV>sY6(D*`4QhbW6GET*kE=$MLv%+`3T0Za3uqNX9|?
+zv!X%JZV5NR3m`WQXQY0lDpQrH5>z@Wg3scqxC)L#-_%DDvYb>VU))u0GdJkIa1J<2
+zooUV#XMwZBx#zHM4Jhl4TONAICY{kalpT+Px&^7m)C6iHb%Z)e?Wa~ygQ;?qinroM
+zIE1FcsM|%Vk!S8NZYKA-Gu3J6<aQ(nJED`*sSkPIaI(4M-H&c-7`4^VQB(*o$1ZL|
+zZKXa?Y3b5*b-EIrmv*T0)JQ5Dbqv?V_fT_mpEM;8-45<oXS!3&`DpL4XW1j|QTBZM
+zs2#VfIcuRGCb=|>fHcsuf_N9sPc5fRsy;oNK0@E2@6o5}rF2_bq_<L~s3W)tUIQa)
+z2zl-{bgwuKoLBY~yS&ZYpRKo6)XHGDwzu1U=nL6h<CcLZYZS_e58>L>ZK@Xi2kp}3
+zn9fXp_>^O8dK+DtzCis%t-%Irgw_)U^4#rYa+cY7?d#T5tF2YbYGe(uc3HIjvmLf4
+zJ9*su?sQTG8E6-7OBvKmnqvksCzvoJvK;$?*~zqIKGI$3t5jC158j5}!$|MwZgMoc
+zoqf;hY;o3AbDO!@JZqX}6YH#1&;D$$blSPONt|3li*b7@4Sj}g$vkAru;bZn>^^oS
+z+nx2Xs~JDjpFTi+!D(<g)SgUmcRKIvLiTjaHs_e-P0=(Ak6FoFWU|&`tD^1Lx1B%S
+z#bi9{gX>W_=uh+trUbi-mAIN*N3I!{i@V2mVsA28nYQ$JY8l=H_x`YZ33^kq>sy=5
+z%;o`OkkQa+W{fdz7?sR><|M0;UChbhW+S;!ew>fWL=*ZpGl|W>&EsBj0`K8JaI3fi
+z+!FRR6JYYug{fRPh!BZ6DYk88wc4A9jgrPweUrXiKcc((K!Y-mne(l2(5p+`1LQtR
+z#+YW92y>Ag!SVcHeh+_v|AX(xJ6vCGFZ+afLqDVr<9VnnDeb0qu+3OG%+AI+y}pk0
+zw^~FisxQ?G81Ia8=1J?Gtvf|XZ?q2IqvABhD(n?*D6jF2g^|J#p}g>fuf@;i{$O`9
+z^XX1hR{Vs_cN;sIZP&Dn^hO8$y4F)Gp%v9SXeYF~I&CBwUreuE+gap(Am#CF>JIHN
+z2^_=U;}eDVLLTu4Q5Fvf1%$!;Ty6^6o=Hz%z}*pX*EtPsul31zuM2u>?XfyT9jwk(
+zU#UH{Oghm$W?5^p{nlwr&Z45!BKj?pfh)>q7G4Mg#H-?0@lSES=oi}yBl&(@X*P)-
+zOR;zw5#6PBN$aa|Nx!TqYD@KR<+yTQVbpPIQ7xcnGg_Iut?bSQw<tP}E7E%zk*mfx
+z6H19mVkc>hv`*?HDPldbpU{ra&YfrK(kF3lG}Be>p_X8t(pPF*)Fh>&;#ZJTL|Lv>
+zQZs3V^xnpGvp&>x8YznJQazbBY$blE@T=HBN|LI2I(f=_o=N4Tu3|GGHNTt9%S@vl
+zqa5UC=ekwFyroao2C6faSMj0oI`Pi&Bk{&cF1468NPlYdw0zE0cQ$H3VP+khlOH2&
+z6@Qo7dLDUvGAkeP<oC3dnutMRGnb0(M*oiQ5agD(XPK%#Q>(95Q-;Ss#n#4F#a_g^
+z#|tUN)q&bydZJmt)|~rf51vBTV!v|zg;U})>8PibyjMOi&y@pm6HgN<jkuMUxyH;$
+zY7yGzUbG`-S!1hKO--fbh!2i&v81RsHZE2=UR>#;KGudBrLEKsOKg-(-Dg&DRfS`s
+zC1Lr3T-iI=+sYe}tILf&nWa5KfUnDTr~Bewq^FZ;Ei+ze%~dD<KIV^2idKo%k8X_C
+zj{Okts@zcf>7~pZc5e4aRF$g9l;A9WrO0@S%Ne}Kys|IgyW}n6ttaR7oDee$jk!)t
+zGpa1g>UwOSSwf$nQp)+*rD&???#PPB<4Ct?`B;be8Kr|($jD*+=(Hl^@LKv0b`{@6
+zj7YWQR^H6M-+V`XvwgC!k~fchRVpHO;(M_5>1_CK_msWXT&rJEb1BDTOQI(uKSZo>
+z`pC>kgJ_4?fp|SNgPz9x(eC4JL2oHPo1K@$3sMz%q_>xk_BZfX@xSop^X2s3_f(dK
+z2*bE$Oj_y|nd;QF@)?D+&dTlB#OV0Q?QmjvQ21Q9Z=^?bXRNG3YuLzV^>t1VKh>6*
+z&8-kdN?GLb-X*?v{%ii%{xyEupW62rdUb|4oA1VEqR*jj(E4k}cI_xk&SpkCMW%+S
+z@Us*tyfi#A@<+5#JfwWqQkk9Yvu*)Ahkn6&g`o7()5p8bx71%G&^J&waLaG_?t0tF
+zYotxWuUsMK0&Ys)+LO&{dSSIee0Q{Mq;>d@lnyEVQXZzP3?GT)j{O<Gqw0D+>#$P-
+z?WEGNefas}Bu^>t@4mzS;els?mw_pP+x|1Y4&L3K)8bOT278}sif%eBthjzsJsb~5
+z6C*XlLsE?7H_7=^?xfre=ZoHq9ajF*ikchjg5)T!!0g~+g5-HGkMJG!ZwM4kXqS*D
+zVL@Pxzq#*-{7^b5bmji0JK?KtS^KonQ>&mfj%|xH3pY>MpFAXaadNs8Go?)AYII}#
+zjOsV0S?S$_s1f~`ttgC;M#v?6tNnWey%SC*>`JJR&^J)df5`jJb6cFqOYCs!J}K_3
+zHuLGvmFqD(GB(^IWkzz=<n+lSlFO#F4d08bh;3C;v|grdZz7GU5Hpy+E+%{Kc)R=8
+z2PP%pV5Z=mgzO1{z-Hek`JJ>*D8wzMKcS!8c^1)^s$Js)qnE;oDPxj9g^q<Hp?S%3
+zQ$B}RMwiAPs5OkgtXXbV9Hr-RtXR*}#Ov`74UA979~=;@6Fi-8H!#Kj+MDb-CN|)Y
+zFdS8nEVTbNdTBw$j24RQNtvH~H#8zNEo6tDCZ`VXh%AhqR&wh{%)U+m^od%|77*r2
+zhva3xe1VP$C4y^%n}gMZqY@eguJ}UoHL0KQCtHB-jn+G#%m(^j%7)nPh!j4X{5aGs
+z^iybRs6ukflv_~K{c(@B#HeA5<N^MTDaRiZvCR2S`7<YE3LXq51$PF;AWm56|I2&Z
+zGhQ^gM$Aln(p9V)#xb>9yg_tQIFMq88ix2#q0sTr?qnu>Fmf<vDkJsm)_dn5nn;)9
+z?h2(m?Y%$wPX#_C><DtH)Zp0Qs)W{oBfg9BEGe}xgxy2EAhOfI+^LmSm{_{V*pw>C
+zy+i8Pl&>v9Ig^{GybE86s`2g`GSAoxNDrzI`-pEYEti-0ss<J%Obqg=a;170%owx-
+zWBuE_(>%GwdE5h<#)aK3)^0tI`XF{G!iP5|uMIJw`(NeIzR=0!{NYf9inmoi>Z`5(
+zZZ#ZaZg8E&)1JS)JN!8k$_Bp#OQe!hjSWssC>$8!OO*3T8~7NLpK40R!6?nC9f{A0
+z{t?cZqJ>I?9)5lIwNt1{^7NE~k?gTf%2REES<A_cBGh5Fop4tYy}EC4;6cK!V763w
+zQ=JRO63zyS`RjT!cy<ULt{y!C?$a}~h`w9t6YCo}mC`?XOi20q>}!G0+Ym|_7j7OM
+z9)F?^H1gS+dlN5X>hkx*oN_VWSAUa)=E3A(_EaB&)q-UbZuupj?%61&=X)`$@D=#7
+zuVEZi+r%qHhlK6q51~?_l&`5m>qE<ulT+44*2O+5z4d_g*x8DP(M7q7LO~d%h5h>j
+ze<iF9TEVZup~2r0ngsUy&cS_3CyZc^QGb(cPIvRN)<(%2s~Fh=HT^A=E0j4jAyhwk
+zR0<P$7xgHEHP$?7Pl4x2W_R(qq|S0npXINU@MG|3@Ii2D@NUB4KxO|>Z+j0Tj^=LB
+z9$ej>X1&pSsoCRMqJ6`1iZ6M1sAgzvC`)qAl&RrL(VFqOs%Y%8`nZMgCwe{?5IcDW
+zc#Ha11$HE~3a$>03MMCzz+Py58u^7dh=0uFqI!@WHf4_0@+*N@)ySokP02~2*`XC7
+zfAZ(#oZ&-}W$-*@(|4LJ9WS~>4PX_%i8MrR;Ct*B5}qa03N{Re67nZ7foZ<O@;a%p
+zaEC2Mk4HD0Jk~0`oSG0X6kQB&sKLo8p@*St$+weVrqqtmF+r)ToiG~Py1NC}V;*s3
+z#eSZ)UdPukP&MIE0u#KIP%@!x;JvScx1J}1c$h27%)=ku+V)AKg_afi^p{BbaO#vn
+z$%T^}Cf`p!lA?uYNBhNRsW0_*R<bh>6{HWcS%fxH8#(A3=U*78lkj`O0(e6;4dnH2
+z@&4(#CC=b8u?s1aba$SciF!%3NW5<}626lnq^wI`ksMFnlX59sJo+j2PD!W#V#e)B
+zB!ODOxLjqifhU7^mG7p1V<1aH>4b2gUZAc&=4~wZl4=NXb~26d2-mO{8jZAyO5fP?
+z$lCDHlp-lOrDV#bl)d3-WKyiP(ns57NcLox!ei(+Y;K{9luF+2jrl(LCkM_4HU#np
+z8vAqlw#rG;N8t$9ozd__;&XPH{q*MQ(D=jXgvhw?gOo`r^Ha2x<M4hi6Z;UquZHzf
+z)?x>t{?rvl;B$zqXQwRs();iGO9sjXlKemUOZwi*bv!?d-T5Nyb7~CA;9jt%8UwT`
+z%G223XsgKFaON-*t`&YAz8#Tc3*)WSrqKFhwwLt6hv_gY2vKpPCzZFX&*z`-KkA<e
+z-_8Ym$UD#TLR9!S>@K<&PDk$8E6pkTa`jz&K&)c4edK0%QFu={XXInVj<$_!%1!OI
+z5w!}tKchX=D<;al5SBvw>wC-i9{IBQQ~3}2C?ED7^AwW?3S+oFOht-CcbqLSi`u0{
+zmBI1iu`<zlk<yXkk#UjCQ889Aen9D_RWYhtU7T6uFn&V6Wv}zoMA_3^ZsC=DLwwVH
+z^?hf&ALT2ap3*hJ<z&{S-k@{tHhZIaTBo#8O5u3USl4JMawQUt^p6&YJZCFG?S}q`
+zx!peM-a^l*Kbe!<2!WDXczVjkz5BdL-W%Q?-u?11&v?lr_T-nc+v)9iJz4E+wyqj}
+zeX?3qNgJ;kI~Yxjj*UKuCdS&t$0@JWM7^jf*_NY{Fn&cJW(V-P&_o*KsV~2ifAE%u
+zIb;ucp=X>_LfpsmTm_~*H3*G&SK8OibjBR*2Q{D+iqDD_jb(~8iQSCNiO*3kt3T-1
+zjmcI^rzA;>Bh+!G4;SGZh>221k01|{=ga+M*VDw)U8*R)<2!Lj7?sL{n~(|4X)CR{
+zKrf}qYG$QxT#sFky@^$bKZE|fqWbg+Mq2B#J>6}LQd2kSL2Q_-Ckz++Nx401Jx@J%
+zJX1V|R9q@1TKp<5Jv)-Vg1xAPyV>?wbB$8Es3oXPlw0u`@hS1M@$yPkd85*L6XU$u
+z#Ev*?NIjfPO<;7k5&tXXT28twrSatPXwn?%gD8q7e}?PKzNMQ|2T^J=+KE`>%_0V^
+zb6N#;yV6uCrL<J`E49^B5bKmRrkPP|sDsIGC<nEkmf3dPWPYO1Nc<?)mIg`fBw3m+
+z-W1;O*SUFYN#-I|6Q3oO-K%y_D>K9px|Uy?rRG#4ilLNM_p0r*QhGU~hxvykJEPqw
+z>5U&yMVTS&Vs0VdO<=^K;x2KoI95y}ju!Uur?^e*Kqf1F2De7Z?p&w5P0ZIuk{;9t
+zYPxz@-LBqM3u=cT&S`42HOE`0ZLiyloI~lTF7y&+H@lVlmCq@x7Lo*8cq1$p(g_2h
+zKR2=SnXYsW>Is?&HO0<D>#TX*(Dg?8U2US)RZG<NYdQ22`Z%a(Uu&9u*on9$(9d`y
+zb%lP!Tw#|(w0DuuAXF8~39PV@PtW&+wy$L7(gUfg*pFVi2b~r6B5Skx*eGmlgM72;
+zS@c@^Dm{a7%9vvIv3lCSIKR0^$Y0379@@jinA2<@E}3h<PvqzD1NdD0el9cDlU=}U
+zq&HBD@i^3*v~U|ZE$l>Vr%9Qkjf}=?{g(b-&uL6EeCA<ujMdJr@6>afkq)Rk?n*VK
+z3xi^^l+D6T<j!)>xEtJZt}=ItEyxaKHiIH_A3sBXk=Jg>;hYi>m)<e!nD2~r#zbSf
+zvCnXg0j6PYu)5i$oOCV)dh8o?9dD(E(?yv(Obhk|i@7{pUXJC?vt2-qsL3p*?@$)b
+zip!%mWVE}*d1Du`7g%0vi`mI6Wfn1Ond8mJW<BePHQN5c(VZ*q8Zs2s!U>=njiysG
+zOBjo($tHp#Gl;FkMwpq5z$DVws06Apo`z16xLeX4=RCD**jKEsR$A+$`Oti2a#mey
+zi<QaVY*%&ucGkHaNJjJ+&B0}<r&MqH4PBF2$ed@Mf!1?~8O`Kp&d^oq{ZtxiAU+MM
+zaeK1c^|(WwFZNJ7!M<$$W{t8&S_`f7mdEaAKeszODb8%S2<X3~P$qmB6s~Jjd3qI{
+zL}z4vVk$5N7{r{V`_n8vmlCO8@jFx(?Ivl-6xVjfJ3;5LJ-{wwr?>rfX1lWei+#?{
+z>dbT~cbXd@Ye_NCackkrxB|6_a;Td0D0(Hmm0n9vrkm3V^l7Rim4ZirCOaIZkOAbY
+zI}|j{^`OS_&I5a&y#d;M(oTXL`#5KuobG(k_r?&73`QSOYtS*XP=ly_)O(7f(?jCu
+z_n<}&p>k2zaUblW1)!Pk`L0BcbhEn;oyAUfr;1a=Dd_y<G>5t$acrl7yV+$(A5hOr
+zp_Rx)E$|kcj0;ljs4>(6YAH3B`h{vrWvAZZ)wm(n&>GOr-x5$S$X`&K25u_%gLBc@
+z<7{(wJ7=9&j^tK$$GI1w?cK;BB7t(f8*;6J$KeC`C8(UKsLWIb$^$CwP5e7(#|7{Q
+z$g>$JktawZDMCW-L3gs--mT!~bF;Wv-2!eU(0ZrB-oM?vq!-x^T77Xe1Qg>hC@Uz?
+zgYjIv0sjGN=VrVZ|BBn-Vqk9EM2k^dQ1{=0Zv8VT%`$oCo^!XjzqvCYui5Sj(28%k
+z$!=Ow9n|=(<T(j|7Cs!*>su&_g18Xq*>xcI+VHm!PK8zU0PRAPQ7cpcS)kf)1Vy|h
+z=<n$X2F3h?`__H$esxXP2a0?R(u2$(yTP5XLE)<liuoM09i4{}n}kwO9K}G5e+x?a
+zX|x&5f};&kA@EH;gR;Mq%qPE)E~F8uO3IKQA^ilZenZj`)cG0UMw}pz;TiQo9jc*r
+z;5SSH4Sx;fvK{pCt!N!uie{ows5fZE6~WsGfUofm>UtddYz3J^CXvx(1mr)Gj3rZ{
+zq}AXQ90%v*1$Z+QN)7%(NmLy*hMc>hK2WcL@aY5F?NC!x3;dG8;KT&L*NKB?@h6Oz
+zOW>9qCi|eJyCCf)2O+m}(256;<435c^WA~T1P)9g@LEcPD^LOIRS~?HGEh=6XhlwN
+zA5y^+%79y<fFtw?>id%X1zPjt@97D726yHa?EM7pQ543#4PFrkZj&GUpfo5wI42n)
+zk4*4812{8jV6PwY6X6^hyrO^nClwUo7+f9so}#c7gVI!RrVL_z_qD#cTK{-jEL_RK
+zSp1g0ZL#0IEE<kda1Q=%mi^l)`{tH?OaJ}nUw+zu{{E*2{?h~h>4E?Bz<+w+KRxiD
+z9{B&Y2mVb8{oh;vwCUgTp>LGXKh%%~Gb;<|pZ}h|?XlsEe@LQ#aYWx{Ti-Y$56s)V
+zzySFn1^##P!yYdjk>DH-=7|&(`7f#{3ItIISfbA`+f0Hv;#){>AbtD$9`<|$(kKMy
+z#9-cN0cFELDPEW%ri1xnHkg&>Lj_S0n1_}?KLCI8Bm6D_{}qOLX&xYuGQn)p4_8ny
+z-;YB+A7CE(42YhaKna}(uID&83bWrskPgGv3D|Q1=Dv4;l6eIshoR*R)IB}SaSNkT
+zs1guEjUjsI0Mt+qn4$ND)Ccv1|2n|lMnEK$htl)FELKJ?%v0aN{P!x%ulE3fv;s()
+z89)q;ftmX+z|8zYMgik86)2!(z!2?$vu?ng`789RA84r`U=H5`$`}gl&s?+|NRVw1
+zf$am{XCFi`|B4dEz}&tauu3JNCqxv38T%EO$*+cTh6AJ29N40Aq&V<Ec}Ol`i}FLX
+z_Y*`)%^;>5PG*ty<QUBILqq^Vt1{#>3`*LBjssQn3MC^8F<AP}8VMLf#P}Kbql-|7
+zCBQdzg!8ij8TJyGsx=UYbcX0OKk*Y2Xqcx!3SD&1x@X)A5Su-QsLFsSvLLAqQQr*m
+z2e4ima6L6qe~5Yxp(jW~sUg;@2@zj!oQOvPm-7oA1T0b$Tps7Z41Nm{)-vFLs>2=s
+z481fTT2__>fc3coMABTKbGo~&+(vGFU{zYW-Q3}@Z@YUPn5PWT{$W6YJtZ<kyThQ@
+zo&h~o5_iOtfJr)yAK?!;j1?TmUm>Qwf%oA>cp$D0M9F)!2S~7rFlw#<htm||!?zG=
+zj(1zQMO@j9I4_(#&Q(aao##%(@w&y_))0>#aZ}ua5QA@r(Oe8@sDnsBKSEnJ<0qJ=
+z3R3l`?$j`991usNsex2$V2#oOzj6%ds2Z5Yryy=EgkF;+q#i`0C)|;4Sr@stoORBx
+zP6wx!Q`RX3pIWf}tFzv@3rtfrcM9}%dMNQ2@xmB9h&bF5ufrdK80t<f1McVpKz<2y
+z209(>p%v;8wF^qFMqyx)`s4KY9E@NOXdumq=B{<?0fV*A`PnH6gwqpXkv7=NAZ@UZ
+z*iUQ>WhXjEq0Dyf0XGP}`ixYDu_EGrz-8s2hEk^~OqU0BWg)$jK2D#a57F!B33N+3
+z8~u`63}t@8(}65I3}f{f=|^mLAt(Y@oc>Na=Y~DgZU%f2XUD9sKrFF#9=j>*yJ=^H
+zGVeR(;4Wt(3xQgj1Pa7p{1!K&4pKq77rmEGp>r~In6AtKrZ3ZmDa&}72lQO1$17?S
+zXcJ3tM!X81#ib-QS?s0<J*I?n&F&8x&s}S&)z_+TmAA@)Ce;hHq+3=RP?2ufrJbEl
+zes`x^lAIw8V7&Cef8znvN2)D-j?T&qV)ijfjKpSTbFt}Jo4Lm<Wg0MXdOoys6R0bT
+z;XV!mzO4$`0p-nhSZ9Wv*4|^avLx%axzU_qjx(p3Yt3sWV>PyRSV4QbEjYh9dEt5K
+z4DYrLs5*X)M^X~Ki1srRnfE|Fjb-<;_t-b=3-$`TmhHi2U{5klnJ08p`V5tunuPyE
+zMbRYk7)Ity=d0Zo+SbDQ040?(iSgJtXPh<e8@f@#9Bck**0nBM&FnAs9OozZ6KHxZ
+zkqqk7U@8NBlx_&RTSN8`D|1aig<QjJ;+Aqlxe8pEUBu>K*8#)yP2o#RbpYP%FL)x_
+zxNDqGb_IL2C0J9;1aq&^-6&}Ah6!{~PNTK4-auxeshYE_qV`LBxziq)t}r=`X5yxB
+z_pZ|;n6&H`HaE9``^e?zoAbT-9(+AeXYX)BIF}v4z5>;5BD66MZ-M$~C|TuRbxgao
+zJ;u5R8s$!4ryl4t^cH$qy)+O{zv^f8EXD#Oy?M~=Vr2%c?U=LJ9Y$KCazG8nsY~>1
+zraJpKJCURLpFt1CLLQ-*kWEnd{d{Zw9oLRK$;xbfW;DHyI*IS2Bp@DvM|5i2!>m1~
+zX|yq}>&^9;wo99!{j81D)@aW`8{ejvFzy*s&H7e$n{tw!x9*?h0cfwMsIByLrY)P1
+zyT<k4Kk`k54Z;&4A|wlUg(X5|;Wl5B-^7L3+-zN@3q61u45OwW>FxG)hS*a<g?(aV
+zGKT3%P*Q5`k-A^qrCw4kwIQ%qHS{F?ccVXOvt>c;E$7xG%~4kvp@ZqZOiQ)|XL7sw
+zy21_N2XVBxRXika1dTqgctR*CEaIPWBA1sf!4#u&f~}+gF?bnN&%M@R^Om7OFV54D
+zHcu_9GHOWCl<aC>(Cb@hind3eX!J3=T7B)Y&Pw+bd5tJ4D_sJ{W>GH4zv7n&#lQ#f
+zN)4rf(g3NR#7mpRT;derI<Ij)F2K^vN9sIYhWe5Uz^N(LTl1w60#~51woT2V?pJy%
+z6~V=5qRde~E4@`(JE_grM;l|zdDdS0xf39D&;)#ddPNh)&-r+jzbuRvgVIdtwUios
+zlGL78(saou4Hr)ffAcP9vhSHw^h~NDmeCD&j?>c4Z%F_!i+UlguX<Uj2He%U_|*8^
+z_=&hj8Ly;Puc@oF8Tve9oB7c4I!)b`BncIx66qbxBQ_cQqvyg-v4a$n+IzNmZhCHc
+zws|^xB2rgrulP!c@?W_->{_^sX{n27Fv;xRwr5$*!J)~l=hkWi<@I-ba6DuDbL?fz
+zh?R@4j~7<{RJN(VX)E<(##ghrJ;8bAmPWtfuT%wQJiCv(!#@(vh_j{Ao>QLeaz{B)
+z?keY(uX<{DR!R57kHTyI95<V-&LmUwZ~=6|?c%WZVRMAhP%j6xR$pabJac?ktVgUy
+ztbS~C?0&3CJQhEutW!5@mvqOdZEdi5cPM#_8c_#mAKR8&!0#0fiL0fq9$FqRKZNNU
+z?R^POSq6EG=Y;e`d?*~^$8yEl`*d$gLF0h7TM4w?OJgOtI_=fo%HnuZtV7I-UWguy
+z-i@Y-O^#)VKa3w#4yyMx$!KF9v+{%1p9QVLsp-i~5?hKNB+M1(fzMY+J|`FR4)f0Q
+zj`ddaK9?KGD?DeU3*uIw26J$ynfml?c=9j1HJuw)XOl5bYm3w=%Ch*aSb^B?XvgSJ
+z(TdSQ(d*I1F(-CEeoc9+rqg=?msi<7=hP*SP$%jQ-I_hc`GwkIH>rcCr2JkU;Jxm3
+zytMCycedB(?IW-BY?FQyy9lX(())=y0B+!7Lc1ev-JD?*(m$$am80>8v9v&JrHwv`
+zT#CGo<cqG1mWjEsFL6^Ts14Vj8BMLHc3&5vWw-#npDDsE=HChFq(Yv|@+Wzgm-038
+z4e)jJ<?tQ#=JNKG$9slL^+YWE&gEl&rzPrVbl)xOY_sy12lTdD2GxjLv0SmC(d5X|
+zNWaLy$nOy+G9y|smMNZ1sj1G={?@yhe_IosY~Y-Ap>%o*OSm4w9`U*K!E-~N;mzn9
+z?>pi<=Ue5g<GbR`<gF#w_2id63A6Y#++0SXTHrlIa{Jp)%@#(IHeYS6RE;-@O^bev
+z42u+tWB}If*GM?BDB3yJB0fmj4o>B8!!Z}zKe?~S3|xf1%Cz8a@`c1f(gM#sxraC4
+zTi|=^WBt1Cq_3&(xL1`WS(DC-g9O5j0^hPSwHSSJD>-Z6DV(Wi*B&UF<EvxGq9{5n
+zk|vTAP70@il5zBS^!M1d_+urHwm=V>+pPMI27Fy}%A^;wnfZA_l9<)=qnyM0(L2HS
+z)tBF2${z&EtfFt8_mF(RGgqo1zT&%Zx0pioczl~=afjLu%<9H9c;@peTwIQoi!P32
+zj@%C)3*QZ=jm(J@2MJk=rBzy~hqdCy8KC4m@NOH7v(gusw%nh5b#cCQ+;c`=<8ADF
+z=qu=N>aXqh`ZxMKzS`b4a&?a+?Gq~U``I*1Kk67_NONb0<u|A6X|;38-1yko;^^Z@
+zjmVqu?(oj=({QQC`N-&Kr&z!ED&?!%PJeBTvT`{0-D#*Sl|)ZvQ}MHfPhwtA6}hC>
+z^{)1L{Pq3q{pI~%eEoc<yzk|=@GK^ZvM`&|m}c}woI=XGbL}r?YvZXl4E%KoT39+d
+zH<A#!7~UE_5hmfpNb2aD=+l@IFQqQlyvAy?qW#%fMH*v5ZDuNPXW<@>lD2qu%k#X|
+zeK&l0{EeW60snSiYF~42Z@Hx>t8`Up#ouCoU}jOzP(JdDbH^%a{-KxGl9aviwXs7{
+zCDIkh$V=ff;V<Fpk(-f;(XO#R@x|b8*Vk_u-7L;I;PwE|{1n}e{lIk)j)-x|CsW>=
+z-u}K9Ksfy1PvgJpYv9}Hy(>TT?3aEP{lXHCWBY)IoB(v=F*}nr#|Y~C)PYL<c%#^_
+z(Yul65e7z$0zJAZQYFgA^q5bnrLNKZ#!|DWecu^F@&l3kGlRHs{ClB@)XLLAF6T}5
+z{^GmqvwgbnlCQh(p*N$qv|PyJiu;7R{B^c0vkKmA4agRUw}+dGK1ZvldKDDU5NjX3
+z7U>=-6v-8-8(9;{7QGeS9NQSbr0`l#{V$`3W!bCUs^~qQM5kt#a+J^#-rQ^9xoGK)
+zdb|0y_)hrN``Y=EyfwU|<Qbkssl51+AI+IeKl&~%juyCz-Q9X)B<h*9H_Daxy%>fP
+zUqu#121mw5jz+Ra4@8H=TE#mnv(yJ#DdP{bq<z)tMjW(+%EN4B)A2*#$-gb#^lX%y
+zd!Kqs_&ULxrWmxZk#~)J$#YfOE)EdV@Y~n|%o<9<L&+<rnSIafVzBx}b)B*%ej3Q$
+z5kSp8kK6^`qY6BQ9b@_9>6L<Ndu^*OflE(0^WAJ{H!edTVe$b@a79QFHR-u$HH_5t
+z-uGS;_>WEApS<hk_a5xA#K*!?z7qEUIQmDp0XpwiaL!uIfGyaoO;txJ^Ws-x`C@yc
+zJ)+g34WbjGucLk8`ywU&5v-ga_3_4QU?Off4aq&!l)6rrW*2f#ct%VuF`j##k+Lo~
+z@{WdYixyt&oeIxHMj&Hyi#C6f>&;?jK9v@)B-z}Zb~PZ(H|WE(t}t#^#Y3^4F*bH5
+zdOrFpnkTk6Rxq9vzo48`|AH~o#yntUa^}F>dl-I4)nV4M@429mPs}E%(hg5qdA<Bb
+zHsp`;F1fyZ9_AV~q!wZ=AshdeUBr}v@274^1=692{mfiy^wFDXZPc;K#duNZ*I}{d
+zv9_@pKw`IzoAFcd4ZKb}uK#TmvnJXvoGN4!;;63lJ|@Cu<x2|1MW1w2>g{>uDIs@|
+zyT}#g7*Hi)sl3!vOcZ+ZRXK^hNGDPm@F~*W^*I-;>1GF`mR=9uZ`%}JnHetz-y5MA
+z8?PSU5-*}WQr4)Gv`P93<D%(WHGyCFK+520)D4<u3vreC3PM)#oj601Jp(-3J!d@!
+zJQF+xJbR?nQd@DNFrS~w^?|3trB2{PRDis5HrYe024;Dqvfe>kqJCAnD|Y;7e0h9T
+z{6gHPj8-J|2$a`b?`{k;ms%HX$0<)nqhmNsWo0U{4Y}HUK_MpmE*6%SOYfo7peHUJ
+zlA6Peri3_5Sk3R^cCbqz!l*?B@pH1(9pN;wOIZcYAB-mYbnTg1M}4eJ1=6LK(oUJL
+zBq{CGWc7Egk6zcPV%D}g+T)xp?tOSJ@_;wrj_Jy_;!1-cwMVEf9uosnZK)%aRX}<v
+z4iiH{Jz*|?jJwM|W^U3)sa1G1YD>zwIh|B?(8_LBGk%5D4kfkYY9}>^O2ce8kJ?kc
+zpjOfzX;bz3Mm{sOm0)LZ3b>U?E7Tv4rY6(lnE`BVn46yFTMGAJ?mb*wDXtS|h|NVL
+zE)Y1OJHLbbi?tY;NuXtl!YZg2?_j-3$YQOcW?$pDo>SkXRRK!omU>3Lt(t0eZL5|C
+zsFprP0n;{LTDR;=&IR`(xr{F2lhjUnF4Kk0$=%_4Lv+zlSRq^&UI|ZyL&7gY7GWo!
+zgP+LVg!MNin8tJuDiM!CQ^^8|e~;TQEx*;&++z5Rd3s*`v9?~D25B9%Ew?^f7mYPW
+z4bw3%TdV9}oi1)YQX1vJJm?4~=_zm@KeA&u2g*Fg$N1DjMnMps^UL`1{8g?Bx0yAV
+zip+3&BXtc{dWk4MsqYSVw%YHlViv4VFh&@%aRlPDmU<nCq(<obb;cNAd@@Fu=^!ed
+zWY=-hKumg?EJnR?DaxXb(7hRfUBRa3CUZ}@^n5kG1>cx2$z!;8?YS>(Z}tIGf|&#>
+zi+HLE9*%a9H*RLPle66>RyXUB*~UyZmKiOL{6>NiFmfA>jd{i!qqcbl#>-2128%lH
+zoZsD!phdkv%Ry7HskQV^%sHk!yNR{fO57lBCd8(bxXxUD?iD+kP0Oxee9TDt2~~s|
+zhp&UK*ae6b?6!AK+lB3|R&iL#lnCsMWxRlx@J~ZAa+^KPBW6Zxwk6q1>_VUy4RBL~
+z!q^ujzzVG9)Mp@cREXPdGr8Hm>}vKjdyBme5%@f|CB&i!Kv{SS>%8tz6{*cwz<psY
+zUO`xuV}fdu1X_h@Ew^fbID5m~YA!Z^GdGy$&6ruznrywc>e{F6ip~Y62@nmx5Dzc~
+zKj1UC7Ig`Tm@PERv}RT@cNvxOun8>Beq}B&vzQu81k{^+u%@aEtSTyow}5uKfCywV
+zkSw!d4cH-Au_f78K`R*m3PXLXDd;9MtYemDRkN4dy4@ADn!4^Kw+6XLYJyT&1y%qS
+zpnikcy8*qNenxwll1w9}9q2T5m_iK2+@NRD73mMubkI!>;%fLdth#&++K}c>2V&&7
+z)5-BT=k3XM6T5)zvytsuqMgI8X%Dk^+flo+vjmj47VZh4Nqz(6WFRPsm4P53xFxLT
+z`%LAgThU{o+->wOXz_3KaJnI#5wxfkR0GNYjjTH8isPY$M}YrO-IcIDFb*pP`#QxP
+z<opS}x69sQ@34>A_h3z4cBh52(0K%_{eA{bGZUy^cSu2?Nd7{_@OXR;d#U=M>FuT-
+zP|2XTiL?M~{ytMTsV$&FRfo}e8P56<CjrY+4OVHcC5;J9j)P8F+I3(J;W}rm)6HoN
+z%3clNg*rIHfbTisd~ve6ZQNzB!ZI7_4Vtb=YM|NZ9!iCq;W?n$q~LULpPErUsGq4s
+zP!qdS4XGc1zxoX8EoZ_x>3|qpiQ0f>`Un)oRwUDR1#_I++%4+*UDbK-JcAZJao#{L
+z@@_7-CamdP4y#2iw*;(k-2l8sT2Q*Dqm#h8WX1J>&sl``0RQv^zr&wEVSJ4r;&XTh
+zP&)%~Et~~MfQ(s$x_}aIg5tdlG|BQL;k!n=9r&VAZeO<(w5K(!d+Y@*pW&`^Pr|xX
+z0-8_*P{P;4T2F)IK}~>rS%)qG6~%$-Qx-SC?O|o=08nN7;qJIKuskK9EDHMa5->g!
+zP<zni1LzC63^kqr#7%Wjp##Knzd+viK^wgepL_0~ph|151S=2AfYvz(7@D2168H;H
+zO$9*D?*ZdrIdDi9zmq*t(7h3;coc9~8W28jpwG|3`rV~)R&Uf0{DlmldnbW^a1fO5
+z888;QlNO+DR{)Br7%2>?7;IG_wV<Rfz${IK(YX~=>wDllSU@M`0cxf`xCH~yXfy+Q
+zY!zsJTfdV(+dxnK9hB~QFtUCDU!fhGS022L4B(mQK+Ze`U*ZH%Ivc+`2{XxLG9Hxo
+zG4Po{rhuBi5cY2Xg6AkW7<b|ReFip$2Ja&iI3y(?ry4*gH3yoiBiyBKs5^YRz;;`3
+z85%(^RDpUGLwSL<N(C+rLK<*9A3)!K0(sql{{7~aoCLSzTRH)%|5<p-ufkos5A}Kp
+zKFt?!J9J=Z7`QqB>%af;X7WN07lJWS^m{4-9!f!2cbx~^lx%QDIw;Ez3N!~gy9*;+
+z1BWII<^JOZeSlt0`tATFK}|kF4}1Z4<X`K}H5e~8l!xG2nCk!68g}`+`}EC!`sO!%
+zOETpDul4NTI3VV~7$8`P`JMUsKfSJR-qt_q+mUY`*MBF2{-^u*kCXO4_x;cR{ui+9
+B8CL)R
+
+literal 0
+HcmV?d00001
+
+diff --git a/src/main/voice-input-session.ts b/src/main/voice-input-session.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..91f5c7855bb9a7d9a5b2974f37ff7dba3478297c
+--- /dev/null
++++ b/src/main/voice-input-session.ts
+@@ -0,0 +1,118 @@
++export interface VoiceTarget {
++  connectionId: string
++  url: string
++  guestId: number
++}
++
++interface OwnedGuest {
++  id: number
++  isDestroyed(): boolean
++  getType(): string
++  getURL(): string
++  hostWebContents: unknown
++  session: unknown
++  executeJavaScript(source: string): Promise<unknown>
++}
++
++export function isOwnedVoiceGuest(
++  guest: OwnedGuest | undefined, target: VoiceTarget, host: unknown, partition: unknown
++): boolean {
++  try {
++    const url = new URL(target.url)
++    return !!guest && !!host && !!partition && guest.id === target.guestId && !guest.isDestroyed() && guest.getType() === 'webview' &&
++      guest.hostWebContents === host && guest.session === partition &&
++      ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password &&
++      new URL(guest.getURL()).origin === url.origin
++  } catch { return false }
++}
++
++export async function readOwnedVoiceToken(
++  guest: OwnedGuest | undefined, target: VoiceTarget, host: unknown, partition: unknown
++): Promise<string> {
++  if (!isOwnedVoiceGuest(guest, target, host, partition)) throw new Error('Voice connection is unavailable')
++  const token = await guest!.executeJavaScript("localStorage.getItem('token') || ''")
++  if (!isOwnedVoiceGuest(guest, target, host, partition)) throw new Error('Voice connection changed')
++  if (typeof token !== 'string' || !token || token.length > 16384) {
++    throw new Error('Not authenticated. Open the selected connection and sign in before using voice input.')
++  }
++  return token
++}
++
++type VoiceRun = {
++  id: number
++  target: VoiceTarget
++  token: string
++  abort: AbortController
++  phase: 'recording' | 'transcribing' | 'ready'
++  text?: string
++}
++
++function sameTarget(left: VoiceTarget, right: VoiceTarget): boolean {
++  return left.connectionId === right.connectionId && left.url === right.url && left.guestId === right.guestId
++}
++
++/** One audio submission and one delivery, bound to the original guest/account. */
++export class VoiceInputSessions {
++  private sequence = 0
++  private current?: VoiceRun
++  private readonly readToken: (target: VoiceTarget) => Promise<string>
++
++  constructor(readToken: (target: VoiceTarget) => Promise<string>) { this.readToken = readToken }
++
++  get id(): number | undefined { return this.current?.id }
++
++  cancel(id?: number): void {
++    if (id !== undefined && this.current?.id !== id) return
++    this.sequence++
++    this.current?.abort.abort(new Error('Voice input cancelled'))
++    this.current = undefined
++  }
++
++  async begin(target: VoiceTarget): Promise<number> {
++    this.cancel()
++    const sequence = this.sequence
++    const snapshot = { ...target }
++    const token = await this.readToken(snapshot)
++    if (sequence !== this.sequence) throw new Error('Voice input superseded')
++    const id = ++this.sequence
++    this.current = { id, target: snapshot, token, abort: new AbortController(), phase: 'recording' }
++    return id
++  }
++
++  private async validate(id: number, target: VoiceTarget): Promise<VoiceRun> {
++    const run = this.current
++    if (!run || run.id !== id || !sameTarget(run.target, target)) throw new Error('Voice input connection changed')
++    const token = await this.readToken(run.target)
++    if (this.current !== run || run.abort.signal.aborted || token !== run.token) {
++      throw new Error('Voice input account changed')
++    }
++    return run
++  }
++
++  async claim(id: number, target: VoiceTarget): Promise<{ token: string; signal: AbortSignal; url: string }> {
++    const run = this.current
++    if (!run || run.id !== id || run.phase !== 'recording') throw new Error('Voice input already submitted or expired')
++    // Reserve before awaiting authentication; uncertain submissions are never replayed.
++    run.phase = 'transcribing'
++    await this.validate(id, target)
++    return { token: run.token, signal: run.abort.signal, url: run.target.url }
++  }
++
++  finish(id: number, text: unknown): void {
++    const run = this.current
++    if (!run || run.id !== id || run.phase !== 'transcribing' || run.abort.signal.aborted) {
++      throw new Error('Voice input expired')
++    }
++    if (typeof text !== 'string') throw new Error('Invalid transcription result')
++    run.text = text.trim()
++    run.phase = 'ready'
++  }
++
++  async deliver(id: number, target: VoiceTarget): Promise<{ target: VoiceTarget; text: string }> {
++    const run = await this.validate(id, target)
++    if (run.phase !== 'ready') throw new Error('Voice transcription is not ready')
++    const result = { target: { ...run.target }, text: run.text! }
++    this.cancel(id)
++    return result
++  }
++}
+diff --git a/src/preload/voice-input-preload.ts b/src/preload/voice-input-preload.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c733675061b5d93c1343f122351a0a85e94ceab
+--- /dev/null
++++ b/src/preload/voice-input-preload.ts
+@@ -0,0 +1,50 @@
++import { ipcRenderer, contextBridge } from 'electron'
++
++export type VoiceInputAPI = typeof api
++
++const api = {
++  // Main process tells us to start/stop recording
++  onRecordingState: (
++    callback: (data: { recording: boolean; sessionId: number }) => void
++  ): void => {
++    ipcRenderer.on('voiceInput:state', (_event, data) => {
++      callback(data)
++    })
++  },
++
++  // Request microphone permission (macOS system-level)
++  checkMicPermission: (): Promise<string> => {
++    return ipcRenderer.invoke('voiceInput:micPermission')
++  },
++
++  // Send recorded audio to main process for transcription
++  transcribe: (sessionId: number, audioBuffer: ArrayBuffer): Promise<any> => {
++    return ipcRenderer.invoke('voiceInput:transcribe', sessionId, audioBuffer)
++  },
++
++  // Notify main process that transcription completed
++  done: (sessionId: number): Promise<void> => {
++    return ipcRenderer.invoke('voiceInput:done', sessionId)
++  },
++
++  // Close/hide the voice input window
++  close: (sessionId: number): Promise<void> => {
++    return ipcRenderer.invoke('voiceInput:close', sessionId)
++  },
++
++  // Report an error
++  error: (sessionId: number, message: string): void => {
++    ipcRenderer.invoke('voiceInput:error', sessionId, message)
++  }
++}
++
++if (process.contextIsolated) {
++  try {
++    contextBridge.exposeInMainWorld('voiceInputAPI', api)
++  } catch (error) {
++    console.error(error)
++  }
++} else {
++  // @ts-ignore
++  window.voiceInputAPI = api
++}
+diff --git a/src/renderer/src/components/VoiceInput.svelte b/src/renderer/src/components/VoiceInput.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f32513bb4518bfbe05ca8a7481a5a3961a893a5
+--- /dev/null
++++ b/src/renderer/src/components/VoiceInput.svelte
+@@ -0,0 +1,311 @@
++<script lang="ts">
++  import { onMount, onDestroy } from 'svelte'
++
++  const api = window.voiceInputAPI
++
++  let sessionId = 0
++  let recording = $state(false)
++  let transcribing = $state(false)
++  let duration = $state(0)
++  let errorMsg = $state('')
++
++  // Waveform
++  let levels: number[] = $state(Array(5).fill(0.15))
++  let animFrame: number | null = null
++
++  let timer: ReturnType<typeof setInterval> | null = null
++  let errorTimer: ReturnType<typeof setTimeout> | null = null
++
++  // Audio
++  let mediaRecorder: MediaRecorder | null = null
++  let audioChunks: Blob[] = []
++  let mediaStream: MediaStream | null = null
++  let analyser: AnalyserNode | null = null
++  let audioCtx: AudioContext | null = null
++  let dataArray: Uint8Array<ArrayBuffer> | null = null
++
++  // Dragging
++  let dragging = false
++  let dragStart = { mx: 0, my: 0, wx: 0, wy: 0 }
++
++  const formatDuration = (s: number): string => {
++    const m = Math.floor(s / 60)
++    return `${m}:${(s % 60).toString().padStart(2, '0')}`
++  }
++
++  const animateLevel = () => {
++    if (analyser && dataArray) {
++      analyser.getByteFrequencyData(dataArray)
++      // Sample 5 frequency bands
++      const bands = 5
++      const step = Math.floor(dataArray.length / bands)
++      levels = Array.from({ length: bands }, (_, i) => {
++        const val = dataArray![i * step] / 255
++        return Math.max(0.15, val)
++      })
++    } else {
++      levels = levels.map(() => 0.15 + Math.random() * 0.6)
++    }
++    animFrame = requestAnimationFrame(animateLevel)
++  }
++
++  const showError = (msg: string, id = sessionId) => {
++    if (id !== sessionId) return
++    cleanup()
++    errorMsg = msg
++    if (errorTimer) clearTimeout(errorTimer)
++    errorTimer = setTimeout(() => {
++      if (id !== sessionId) return
++      errorMsg = ''
++      api?.close(id)
++      sessionId = 0
++    }, 3000)
++  }
++
++  const startRecording = async (id: number) => {
++    cleanup()
++    sessionId = id
++    if (errorTimer) { clearTimeout(errorTimer); errorTimer = null }
++    errorMsg = ''
++    recording = true
++    duration = 0
++    const chunks: Blob[] = []
++    audioChunks = chunks
++    animateLevel()
++    await new Promise((resolve) => setTimeout(resolve, 500))
++    if (id !== sessionId || !recording) return
++    try {
++      const permission = await api?.checkMicPermission()
++      if (id !== sessionId || !recording) return
++      if (permission === 'denied') throw new Error('Microphone access denied. Check system permissions.')
++      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
++      if (id !== sessionId || !recording) { stream.getTracks().forEach(track => track.stop()); return }
++      mediaStream = stream
++      audioCtx = new AudioContext()
++      analyser = audioCtx.createAnalyser()
++      analyser.fftSize = 64
++      dataArray = new Uint8Array(analyser.frequencyBinCount)
++      audioCtx.createMediaStreamSource(stream).connect(analyser)
++      const recorder = new MediaRecorder(stream, {
++        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm'
++      })
++      mediaRecorder = recorder
++      recorder.ondataavailable = event => { if (event.data.size > 0) chunks.push(event.data) }
++      recorder.start(250)
++      timer = setInterval(() => { if (id === sessionId) duration++ }, 1000)
++    } catch (error: any) {
++      if (id !== sessionId) return
++      const message = error?.name === 'NotFoundError'
++        ? 'No microphone found. Connect a microphone and try again.'
++        : error?.message || 'Mic access failed'
++      showError(message, id)
++      api?.error(id, message)
++    }
++  }
++
++  const cleanup = () => {
++    recording = false
++    transcribing = false
++    if (timer) { clearInterval(timer); timer = null }
++    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null }
++    levels = Array(5).fill(0.15)
++    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
++      mediaRecorder.stop()
++    }
++    if (mediaStream) {
++      mediaStream.getTracks().forEach((t) => t.stop())
++      mediaStream = null
++    }
++    if (audioCtx) {
++      audioCtx.close()
++      audioCtx = null
++      analyser = null
++    }
++    mediaRecorder = null
++  }
++
++  const cancelRecording = () => {
++    const id = sessionId
++    sessionId = 0
++    cleanup()
++    api?.close(id)
++  }
++
++  const stopRecording = async () => {
++    const id = sessionId
++    const recorder = mediaRecorder
++    if (!recorder || recorder.state === 'inactive' || duration < 1) { cancelRecording(); return }
++    const chunks = audioChunks
++    const stream = mediaStream
++    const context = audioCtx
++    recording = false
++    if (timer) { clearInterval(timer); timer = null }
++    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null }
++    levels = Array(5).fill(0.15)
++    const audioBlob = await new Promise<Blob>(resolve => {
++      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType }))
++      recorder.stop()
++    })
++    stream?.getTracks().forEach(track => track.stop())
++    void context?.close()
++    if (id !== sessionId) return
++    if (mediaStream === stream) mediaStream = null
++    if (audioCtx === context) { audioCtx = null; analyser = null }
++    if (mediaRecorder === recorder) mediaRecorder = null
++    if (audioBlob.size < 4096) { cancelRecording(); return }
++    transcribing = true
++    try {
++      const buffer = await audioBlob.arrayBuffer()
++      if (id !== sessionId) return
++      const result = await api?.transcribe(id, buffer)
++      if (id !== sessionId) return
++      if (result?.text?.trim()) await api?.done(id)
++      else await api?.close(id)
++      if (id === sessionId) { sessionId = 0; cleanup() }
++    } catch (error: any) {
++      if (id !== sessionId) return
++      const message = error?.message || 'Transcription failed'
++      showError(message, id)
++      api?.error(id, message)
++    }
++  }
++
++  const onMouseDown = (e: MouseEvent) => {
++    dragging = true
++    dragStart = { mx: e.screenX, my: e.screenY, wx: window.screenX, wy: window.screenY }
++  }
++
++  const onMouseMove = (e: MouseEvent) => {
++    if (!dragging) return
++    window.moveTo(
++      dragStart.wx + (e.screenX - dragStart.mx),
++      dragStart.wy + (e.screenY - dragStart.my)
++    )
++  }
++
++  const onMouseUp = () => { dragging = false }
++
++  onMount(() => {
++    api?.onRecordingState((data) => {
++      if (data.recording && data.sessionId !== sessionId) void startRecording(data.sessionId)
++      else if (!data.recording && data.sessionId === sessionId && recording) void stopRecording()
++    })
++  })
++
++  onDestroy(() => {
++    sessionId = 0
++    cleanup()
++    if (errorTimer) clearTimeout(errorTimer)
++  })
++</script>
++
++<svelte:window
++  onkeydown={(e) => { if (e.key === 'Escape') cancelRecording() }}
++  onmousemove={onMouseMove}
++  onmouseup={onMouseUp}
++/>
++
++<!-- svelte-ignore a11y_no_static_element_interactions -->
++<div class="pill" onmousedown={onMouseDown}>
++  {#if recording}
++    <div class="bars">
++      {#each levels as level}
++        <div class="bar" style="height: {6 + level * 22}px"></div>
++      {/each}
++    </div>
++    <span class="time">{formatDuration(duration)}</span>
++  {:else if transcribing}
++    <div class="loader"></div>
++  {:else if errorMsg}
++    <span class="err">{errorMsg}</span>
++  {/if}
++</div>
++
++<style>
++  @font-face {
++    font-family: 'Archivo';
++    src: url('../lib/assets/fonts/Archivo-Variable.ttf');
++    font-display: swap;
++  }
++  :global(*) { margin: 0; padding: 0; box-sizing: border-box; }
++  :global(html), :global(body), :global(#app) {
++    height: 100%; width: 100%;
++    background: transparent;
++    overflow: hidden;
++    user-select: none;
++    -webkit-font-smoothing: antialiased;
++  }
++
++  .pill {
++    position: absolute;
++    top: 50%; left: 50%;
++    transform: translate(-50%, -50%);
++    display: inline-flex;
++    align-items: center;
++    gap: 12px;
++    padding: 0 20px;
++    height: 44px;
++    border-radius: 22px;
++    cursor: grab;
++    font-family: 'Archivo', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
++    animation: appear 0.15s ease-out;
++
++    background: rgba(30, 30, 30, 0.78);
++    backdrop-filter: blur(40px) saturate(1.8);
++    -webkit-backdrop-filter: blur(40px) saturate(1.8);
++    border: 0.5px solid rgba(255, 255, 255, 0.12);
++    box-shadow:
++      0 2px 12px rgba(0, 0, 0, 0.35),
++      inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
++  }
++
++  .pill:active { cursor: grabbing; }
++
++  @keyframes appear {
++    from { opacity: 0; transform: translate(-50%, -50%) scale(0.92); }
++    to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
++  }
++
++  .bars {
++    display: flex;
++    align-items: center;
++    gap: 3px;
++    height: 28px;
++  }
++
++  .bar {
++    width: 4px;
++    border-radius: 99px;
++    background: #fff;
++    opacity: 0.9;
++    transition: height 60ms ease-out;
++    min-height: 6px;
++  }
++
++  .time {
++    font-size: 14px;
++    font-weight: 600;
++    font-variant-numeric: tabular-nums;
++    color: rgba(255, 255, 255, 0.85);
++    letter-spacing: 0.01em;
++  }
++
++  .loader {
++    width: 16px;
++    height: 16px;
++    border: 2px solid rgba(255, 255, 255, 0.15);
++    border-top-color: rgba(255, 255, 255, 0.8);
++    border-radius: 50%;
++    animation: spin 0.7s linear infinite;
++  }
++
++  @keyframes spin {
++    to { transform: rotate(360deg); }
++  }
++
++  .err {
++    font-size: 12px;
++    font-weight: 500;
++    color: #ff6b6b;
++  }
++</style>
+diff --git a/src/renderer/src/lib/components/Main/Settings/VoiceShortcuts.svelte b/src/renderer/src/lib/components/Main/Settings/VoiceShortcuts.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e0f464046bfc78f082722f05c5ada08468c0935
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Settings/VoiceShortcuts.svelte
+@@ -0,0 +1,407 @@
++<script lang="ts">
++  import { config } from '../../../stores'
++  import i18n from '../../../i18n'
++  import Switch from '../../common/Switch.svelte'
++  // Spotlight shortcut recorder
++  let spotlightShortcutValue = $state('')
++  let spotlightRecording = $state(false)
++  let spotlightShortcutInputEl = $state<HTMLButtonElement | null>(null)
++
++  // Voice input shortcut recorder
++  let voiceInputShortcutValue = $state('')
++  let voiceInputRecording = $state(false)
++  let voiceInputShortcutInputEl = $state<HTMLButtonElement | null>(null)
++  let voiceInputEnabled = $state(true)
++
++  // Call shortcut recorder
++  let callShortcutValue = $state('')
++  let callRecording = $state(false)
++  let callShortcutInputEl = $state<HTMLButtonElement | null>(null)
++  let callEnabled = $state(true)
++
++  // Spotlight clipboard paste
++  let spotlightClipboardPaste = $state(true)
++
++  $effect(() => {
++    if ($config?.spotlightShortcut !== undefined) {
++      spotlightShortcutValue = $config.spotlightShortcut ?? ''
++    }
++    if ($config?.spotlightClipboardPaste !== undefined) {
++      spotlightClipboardPaste = $config.spotlightClipboardPaste ?? true
++    }
++  })
++
++  $effect(() => {
++    if ($config?.voiceInputShortcut !== undefined) {
++      voiceInputShortcutValue = $config.voiceInputShortcut ?? ''
++    }
++    if ($config?.voiceInputEnabled !== undefined) {
++      voiceInputEnabled = $config.voiceInputEnabled ?? true
++    }
++  })
++
++  $effect(() => {
++    if ($config?.callShortcut !== undefined) {
++      callShortcutValue = $config.callShortcut ?? ''
++    }
++    if ($config?.callEnabled !== undefined) {
++      callEnabled = $config.callEnabled ?? true
++    }
++  })
++
++  const keyToElectron = (e: KeyboardEvent): string | null => {
++    const parts: string[] = []
++    if (e.metaKey || e.ctrlKey) parts.push('CommandOrControl')
++    if (e.altKey) parts.push('Alt')
++    if (e.shiftKey) parts.push('Shift')
++
++    // Ignore bare modifier presses
++    const ignore = ['Control', 'Meta', 'Alt', 'Shift']
++    if (ignore.includes(e.key)) return null
++
++    // Use e.code to get the physical key (avoids macOS Alt producing unicode like √ for V)
++    const codeMap: Record<string, string> = {
++      Space: 'Space',
++      ArrowUp: 'Up',
++      ArrowDown: 'Down',
++      ArrowLeft: 'Left',
++      ArrowRight: 'Right',
++      Enter: 'Return',
++      Backquote: '`',
++      Minus: '-',
++      Equal: '=',
++      BracketLeft: '[',
++      BracketRight: ']',
++      Backslash: '\\',
++      Semicolon: ';',
++      Quote: "'",
++      Comma: ',',
++      Period: '.',
++      Slash: '/'
++    }
++
++    let key: string
++    if (codeMap[e.code]) {
++      key = codeMap[e.code]
++    } else if (e.code.startsWith('Key')) {
++      key = e.code.slice(3) // KeyA → A
++    } else if (e.code.startsWith('Digit')) {
++      key = e.code.slice(5) // Digit1 → 1
++    } else if (e.code.startsWith('F') && /^F\d+$/.test(e.code)) {
++      key = e.code // F1, F2, etc.
++    } else {
++      key = e.key.length === 1 ? e.key.toUpperCase() : e.key
++    }
++
++    parts.push(key)
++    return parts.join('+')
++  }
++
++  const displayShortcut = (accel: string): string => {
++    if (!accel) return ''
++    const isMac = navigator.platform.includes('Mac')
++    return accel
++      .replace(/CommandOrControl/g, isMac ? '⌘' : 'Ctrl')
++      .replace(/Alt/g, isMac ? '⌥' : 'Alt')
++      .replace(/Shift/g, isMac ? '⇧' : 'Shift')
++      .replace(/\+/g, ' + ')
++  }
++
++  const handleSpotlightShortcutKeydown = async (e: KeyboardEvent) => {
++    e.preventDefault()
++    e.stopPropagation()
++
++    if (e.key === 'Escape') {
++      spotlightRecording = false
++      return
++    }
++
++    if (e.key === 'Backspace' || e.key === 'Delete') {
++      spotlightShortcutValue = ''
++      spotlightRecording = false
++      await window.electronAPI.setConfig({ spotlightShortcut: '' })
++      config.set(await window.electronAPI.getConfig())
++      return
++    }
++
++    const accel = keyToElectron(e)
++    if (accel) {
++      spotlightShortcutValue = accel
++      spotlightRecording = false
++      await window.electronAPI.setConfig({ spotlightShortcut: accel })
++      config.set(await window.electronAPI.getConfig())
++    }
++  }
++
++  const handleVoiceInputShortcutKeydown = async (e: KeyboardEvent) => {
++    e.preventDefault()
++    e.stopPropagation()
++
++    if (e.key === 'Escape') {
++      voiceInputRecording = false
++      return
++    }
++
++    if (e.key === 'Backspace' || e.key === 'Delete') {
++      voiceInputShortcutValue = ''
++      voiceInputRecording = false
++      await window.electronAPI.setConfig({ voiceInputShortcut: '' })
++      config.set(await window.electronAPI.getConfig())
++      return
++    }
++
++    const accel = keyToElectron(e)
++    if (accel) {
++      voiceInputShortcutValue = accel
++      voiceInputRecording = false
++      await window.electronAPI.setConfig({ voiceInputShortcut: accel })
++      config.set(await window.electronAPI.getConfig())
++    }
++  }
++
++  const handleCallShortcutKeydown = async (e: KeyboardEvent) => {
++    e.preventDefault()
++    e.stopPropagation()
++
++    if (e.key === 'Escape') {
++      callRecording = false
++      return
++    }
++
++    if (e.key === 'Backspace' || e.key === 'Delete') {
++      callShortcutValue = ''
++      callRecording = false
++      await window.electronAPI.setConfig({ callShortcut: '' })
++      config.set(await window.electronAPI.getConfig())
++      return
++    }
++
++    const accel = keyToElectron(e)
++    if (accel) {
++      callShortcutValue = accel
++      callRecording = false
++      await window.electronAPI.setConfig({ callShortcut: accel })
++      config.set(await window.electronAPI.getConfig())
++    }
++  }
++
++</script>
++<div class="flex flex-col divide-y divide-white/[0.04]">
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.spotlightShortcut')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">
++        {#if spotlightRecording}
++          {$i18n.t('settings.general.globalShortcutRecording')}
++        {:else}
++          {$i18n.t('settings.general.spotlightShortcutDesc')}
++        {/if}
++      </div>
++    </div>
++    <div class="flex items-center gap-1.5">
++      <button
++        bind:this={spotlightShortcutInputEl}
++        class="text-[12px] px-3 py-1.5 border-none outline-none rounded-xl transition min-w-[80px] text-center
++          {spotlightRecording
++            ? 'bg-black/[0.08] dark:bg-white/[0.10] text-[#1d1d1f] dark:text-[#fafafa] opacity-80 animate-pulse'
++            : 'bg-black/[0.04] dark:bg-white/[0.06] text-[#1d1d1f] dark:text-[#fafafa] opacity-60 hover:opacity-80'}"
++        onclick={() => {
++          spotlightRecording = true
++          spotlightShortcutInputEl?.focus()
++        }}
++        onkeydown={(e) => {
++          if (spotlightRecording) handleSpotlightShortcutKeydown(e)
++        }}
++        onblur={() => {
++          spotlightRecording = false
++        }}
++      >
++        {#if spotlightRecording}
++          <span class="text-[11px]">{$i18n.t('settings.general.pressShortcut')}</span>
++        {:else if spotlightShortcutValue}
++          {displayShortcut(spotlightShortcutValue)}
++        {:else}
++          <span class="opacity-40">{$i18n.t('common.disabled')}</span>
++        {/if}
++      </button>
++      {#if spotlightShortcutValue && !spotlightRecording}
++        <button
++          aria-label={$i18n.t('settings.general.clearShortcut')}
++          class="opacity-20 hover:opacity-50 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0.5 shrink-0"
++          onclick={async () => {
++            spotlightShortcutValue = ''
++            await window.electronAPI.setConfig({ spotlightShortcut: '' })
++            config.set(await window.electronAPI.getConfig())
++          }}
++        >
++          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
++          </svg>
++        </button>
++      {/if}
++    </div>
++  </div>
++
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.clipboardAutoPaste')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.general.clipboardAutoPasteDesc')}</div>
++    </div>
++    <Switch
++      checked={spotlightClipboardPaste}
++      label={$i18n.t('settings.general.toggleClipboardAutoPaste')}
++      onchange={async (value) => {
++        spotlightClipboardPaste = value
++        await window.electronAPI.setConfig({ spotlightClipboardPaste: value })
++        config.set(await window.electronAPI.getConfig())
++      }}
++    />
++  </div>
++
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.voiceInput')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.general.voiceInputDesc')}</div>
++    </div>
++    <Switch
++      checked={voiceInputEnabled}
++      label={$i18n.t('settings.general.toggleVoiceInput')}
++      onchange={async (value) => {
++        voiceInputEnabled = value
++        await window.electronAPI.setConfig({ voiceInputEnabled: value })
++        config.set(await window.electronAPI.getConfig())
++      }}
++    />
++  </div>
++
++  {#if voiceInputEnabled}
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.voiceInputShortcut')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">
++        {#if voiceInputRecording}
++          {$i18n.t('settings.general.pressShortcut')}
++        {:else}
++          {$i18n.t('settings.general.voiceInputShortcutDesc')}
++        {/if}
++      </div>
++    </div>
++    <div class="flex items-center gap-1.5">
++      <button
++        bind:this={voiceInputShortcutInputEl}
++        class="text-[12px] px-3 py-1.5 border-none outline-none rounded-xl transition min-w-[80px] text-center
++          {voiceInputRecording
++            ? 'bg-black/[0.08] dark:bg-white/[0.10] text-[#1d1d1f] dark:text-[#fafafa] opacity-80 animate-pulse'
++            : 'bg-black/[0.04] dark:bg-white/[0.06] text-[#1d1d1f] dark:text-[#fafafa] opacity-60 hover:opacity-80'}"
++        onclick={() => {
++          voiceInputRecording = true
++          voiceInputShortcutInputEl?.focus()
++        }}
++        onkeydown={(e) => {
++          if (voiceInputRecording) handleVoiceInputShortcutKeydown(e)
++        }}
++        onblur={() => {
++          voiceInputRecording = false
++        }}
++      >
++        {#if voiceInputRecording}
++          <span class="text-[11px]">{$i18n.t('settings.general.pressShortcut')}</span>
++        {:else if voiceInputShortcutValue}
++          {displayShortcut(voiceInputShortcutValue)}
++        {:else}
++          <span class="opacity-40">{$i18n.t('common.disabled')}</span>
++        {/if}
++      </button>
++      {#if voiceInputShortcutValue && !voiceInputRecording}
++        <button
++          aria-label={$i18n.t('settings.general.clearShortcut')}
++          class="opacity-20 hover:opacity-50 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0.5 shrink-0"
++          onclick={async () => {
++            voiceInputShortcutValue = ''
++            await window.electronAPI.setConfig({ voiceInputShortcut: '' })
++            config.set(await window.electronAPI.getConfig())
++          }}
++        >
++          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
++          </svg>
++        </button>
++      {/if}
++    </div>
++  </div>
++  {/if}
++
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.call')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.general.callDesc')}</div>
++    </div>
++    <Switch
++      checked={callEnabled}
++      label={$i18n.t('settings.general.toggleCall')}
++      onchange={async (value) => {
++        callEnabled = value
++        await window.electronAPI.setConfig({ callEnabled: value })
++        config.set(await window.electronAPI.getConfig())
++      }}
++    />
++  </div>
++
++  {#if callEnabled}
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.general.callShortcut')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">
++        {#if callRecording}
++          {$i18n.t('settings.general.pressShortcut')}
++        {:else}
++          {$i18n.t('settings.general.callShortcutDesc')}
++        {/if}
++      </div>
++    </div>
++    <div class="flex items-center gap-1.5">
++      <button
++        bind:this={callShortcutInputEl}
++        class="text-[12px] px-3 py-1.5 border-none outline-none rounded-xl transition min-w-[80px] text-center
++          {callRecording
++            ? 'bg-black/[0.08] dark:bg-white/[0.10] text-[#1d1d1f] dark:text-[#fafafa] opacity-80 animate-pulse'
++            : 'bg-black/[0.04] dark:bg-white/[0.06] text-[#1d1d1f] dark:text-[#fafafa] opacity-60 hover:opacity-80'}"
++        onclick={() => {
++          callRecording = true
++          callShortcutInputEl?.focus()
++        }}
++        onkeydown={(e) => {
++          if (callRecording) handleCallShortcutKeydown(e)
++        }}
++        onblur={() => {
++          callRecording = false
++        }}
++      >
++        {#if callRecording}
++          <span class="text-[11px]">{$i18n.t('settings.general.pressShortcut')}</span>
++        {:else if callShortcutValue}
++          {displayShortcut(callShortcutValue)}
++        {:else}
++          <span class="opacity-40">{$i18n.t('common.disabled')}</span>
++        {/if}
++      </button>
++      {#if callShortcutValue && !callRecording}
++        <button
++          aria-label={$i18n.t('settings.general.clearShortcut')}
++          class="opacity-20 hover:opacity-50 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0.5 shrink-0"
++          onclick={async () => {
++            callShortcutValue = ''
++            await window.electronAPI.setConfig({ callShortcut: '' })
++            config.set(await window.electronAPI.getConfig())
++          }}
++        >
++          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
++          </svg>
++        </button>
++      {/if}
++    </div>
++  </div>
++  {/if}
++
++</div>
+diff --git a/src/renderer/src/voice-input-main.ts b/src/renderer/src/voice-input-main.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c618fcf1aa93f7a8ebe262479bc452b8cea48d85
+--- /dev/null
++++ b/src/renderer/src/voice-input-main.ts
+@@ -0,0 +1,8 @@
++import { mount } from 'svelte'
++import VoiceInput from './components/VoiceInput.svelte'
++
++const app = mount(VoiceInput, {
++  target: document.getElementById('app')!
++})
++
++export default app
+diff --git a/src/renderer/voice-input.html b/src/renderer/voice-input.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7733f0592b07b74b4fbd514680483f507620156
+--- /dev/null
++++ b/src/renderer/voice-input.html
+@@ -0,0 +1,15 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <title>Open WebUI – Voice Input</title>
++    <meta
++      http-equiv="Content-Security-Policy"
++      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
++    />
++  </head>
++  <body>
++    <div id="app"></div>
++    <script type="module" src="/src/voice-input-main.ts"></script>
++  </body>
++</html>

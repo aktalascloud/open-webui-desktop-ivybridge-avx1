@@ -1,4 +1,12 @@
-01-runtime.patch
-02-build.patch
-03-tests.patch
-04-documentation.patch
+01-connection-isolation.patch
+02-voice-shortcuts.patch
+03-managed-services.patch
+04-localization.patch
+05-desktop-shell.patch
+06-updates.patch
+07-avx-pty.patch
+08-electron-packaging.patch
+09-portable-install.patch
+10-ci-build.patch
+11-project-docs.patch
+12-fork-records.patch

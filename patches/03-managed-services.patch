@@ -1,0 +1,1459 @@
+diff --git a/.avx1/managed-service.test.mjs b/.avx1/managed-service.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ce740a6fe39d741d8437ac4296a136e087321b8
+--- /dev/null
++++ b/.avx1/managed-service.test.mjs
+@@ -0,0 +1,88 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++
++const moduleUrl = new URL('../src/main/process/managedService.ts', import.meta.url)
++const source = readFileSync(moduleUrl, 'utf8').replace(
++  "'./outputBuffer'",
++  JSON.stringify(new URL('../src/main/process/outputBuffer.ts', import.meta.url).href)
++)
++const { ManagedService } = await import(`data:text/javascript;base64,${Buffer.from(
++  stripTypeScriptTypes(source, { mode: 'transform' })
++).toString('base64')}`)
++
++function externalFixture() {
++  let spawns = 0
++  const service = new ManagedService(() => { spawns++; throw Error('external spawn') }, true)
++  return { service, assertNoSpawn: () => assert.equal(spawns, 0) }
++}
++
++test('external readiness is shared; input, stop and shutdown never own a process', async () => {
++  const { service, assertNoSpawn } = externalFixture()
++  let probes = 0
++  const prepare = async () => ({ external: true, url: 'http://127.0.0.1:8080',
++    ready: async () => { probes++ } })
++  const states = []
++  service.subscribe(event => { if (event.type === 'state') states.push(event.info.status) })
++  const first = service.start(prepare)
++  assert.equal(service.start(prepare), first)
++  await first
++  assert.equal(probes, 1)
++  assert.equal(service.info.pid, null)
++  assert.equal(service.info.reachable, true)
++  service.write(service.info.runId, 'never sent')
++  service.resize(service.info.runId, 80, 24)
++  await service.stop()
++  assert.equal(service.info.status, 'stopped')
++  await service.shutdown()
++  assertNoSpawn()
++  assert.deepEqual(states, ['starting', 'starting', 'started', 'stopping', 'stopped', 'stopping', 'stopped'])
++  await assert.rejects(service.start(prepare), /shutting down/)
++})
++
++test('failed external health probe does not spawn a replacement or acquire a PID', async () => {
++  const { service, assertNoSpawn } = externalFixture()
++  await assert.rejects(service.start(async () => ({ external: true, url: 'http://127.0.0.1:8080',
++    ready: async () => { throw Error('unavailable') } })), /unavailable/)
++  assert.equal(service.info.status, 'failed')
++  assert.equal(service.info.pid, null)
++  assert.equal(service.info.reachable, false)
++  await service.shutdown()
++  assertNoSpawn()
++})
++
++test('stop cancels a non-cooperative external health read without killing any process', async () => {
++  const { service, assertNoSpawn } = externalFixture()
++  let entered
++  const started = new Promise(resolve => { entered = resolve })
++  const pending = service.start(async () => ({ external: true, url: 'http://127.0.0.1:8080',
++    ready: async () => { entered(); await new Promise(() => {}) } }))
++  const rejection = assert.rejects(pending, /cancelled/)
++  await started
++  await service.stop()
++  await rejection
++  assert.equal(service.info.status, 'stopped')
++  assertNoSpawn()
++})
++
++test('owned PTY still receives input and exits through graceful lifecycle', async () => {
++  let onExit
++  const calls = []
++  const child = { pid: 42,
++    onData: () => ({ dispose() {} }),
++    onExit: callback => { onExit = callback; return { dispose() {} } },
++    write: data => calls.push(['write', data]),
++    resize: (cols, rows) => calls.push(['resize', cols, rows]),
++    kill: force => { calls.push(['kill', force]); onExit({ exitCode: 0 }) } }
++  const service = new ManagedService(() => child, true)
++  await service.start(async () => ({ file: 'synthetic-python', args: [], env: {},
++    url: 'http://127.0.0.1:8081', ready: async () => {} }))
++  service.write(service.info.runId - 1, 'stale')
++  service.write(service.info.runId, 'hello')
++  service.resize(service.info.runId, 80, 24)
++  await service.stop()
++  assert.deepEqual(calls, [['write', 'hello'], ['resize', 80, 24], ['kill', false]])
++  assert.equal(service.info.pid, null)
++  assert.equal(service.info.status, 'stopped')
++})
+diff --git a/.avx1/open-terminal-lifecycle.test.mjs b/.avx1/open-terminal-lifecycle.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bddf8454fd83d8b11adc3a61df4bc71cd96ceaec
+--- /dev/null
++++ b/.avx1/open-terminal-lifecycle.test.mjs
+@@ -0,0 +1,182 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++import ts from 'typescript'
++
++const serviceSource = readFileSync(new URL('../src/main/process/managedService.ts', import.meta.url), 'utf8')
++  .replace("'./outputBuffer'", JSON.stringify(new URL('../src/main/process/outputBuffer.ts', import.meta.url).href))
++const { ManagedService, waitForReady } = await import(`data:text/javascript;base64,${Buffer.from(
++  stripTypeScriptTypes(serviceSource, { mode: 'transform' })
++).toString('base64')}`)
++const source = readFileSync(new URL('../src/main/utils/open-terminal.ts', import.meta.url), 'utf8')
++const tree = ts.createSourceFile('terminal.ts', source, ts.ScriptTarget.Latest, true)
++const body = stripTypeScriptTypes(tree.statements.filter(node => !ts.isImportDeclaration(node))
++  .map(node => node.getText(tree)).join('\n').replace(/^export /gm, ''))
++
++function fixture(managed = true) {
++  const calls = [], requests = [], writes = [], launches = []
++  const config = { localServer: { managedBackend: managed },
++    openTerminal: { port: 39284, apiKey: 'synthetic-key', cwd: 'synthetic-home' }, envVars: {} }
++  let exit
++  const child = { pid: 42, onData: callback => { child.output = callback; return { dispose() {} } },
++    onExit: callback => { exit = callback; return { dispose() {} } },
++    kill: force => { calls.push(['kill', force]); exit({ exitCode: 0 }) }, write() {}, resize() {} }
++  const dependencies = {
++    ManagedService, waitForReady,
++    crypto: { randomBytes: () => { calls.push('generate-key'); return { toString: () => 'synthetic-generated' } } },
++    os: { homedir: () => 'synthetic-home' }, log: { info() {} },
++    spawnPty: launch => { launches.push(launch); return child },
++    getConfig: async () => config,
++    setConfig: async value => { writes.push(value); Object.assign(config, value) },
++    getPythonPath: () => 'synthetic-python',
++    isPythonInstalled: () => true,
++    isPackageInstalled: () => true,
++    installPython: async () => { calls.push('install-python'); return true },
++    installPackage: async () => { calls.push('install-package'); return true },
++    portInUse: async () => { calls.push('port-check'); return false },
++    pythonEnv: () => ({ KEEP: 'yes', OPEN_TERMINAL_API_KEY_FILE: 'unrelated-private-path', open_terminal_api_key: 'unrelated-key' }),
++    fetch: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ status: 'ok' }) } }
++  }
++  const module = new Function('dependencies', `with (dependencies) { ${body};
++    return {startOpenTerminal, stopOpenTerminal, updateOpenTerminal, getOpenTerminalInfo, terminalService}; }`)(dependencies)
++  return { ...module, config, calls, requests, writes, launches, dependencies, child }
++}
++
++test('managed Terminal authenticates without spawning, installing, changing a key or stopping the external process', async () => {
++  const f = fixture()
++  const info = await f.startOpenTerminal()
++  assert.equal(info.status, 'started')
++  assert.equal(info.external, true)
++  assert.equal(info.pid, null)
++  assert.equal(info.apiKey, 'synthetic-key')
++  assert.equal(f.requests[0].url, 'http://127.0.0.1:39284/api/health')
++  assert.equal(f.requests[0].options.headers.Authorization, 'Bearer synthetic-key')
++  assert.equal(f.requests[0].options.redirect, 'error')
++  await f.stopOpenTerminal()
++  await f.terminalService.shutdown()
++  assert.deepEqual(f.calls, [])
++  assert.deepEqual(f.writes, [])
++  assert.deepEqual(f.launches, [])
++  assert.equal(f.getOpenTerminalInfo().apiKey, null)
++})
++
++test('missing credentials or failed external authentication never falls back to another port or owned launch', async () => {
++  for (const missingKey of [false, true]) {
++    const f = fixture()
++    if (missingKey) f.config.openTerminal.apiKey = ''
++    f.dependencies.fetch = async () => ({ ok: false, status: 401 })
++    await assert.rejects(f.startOpenTerminal())
++    assert.deepEqual(f.calls, [])
++    assert.deepEqual(f.launches, [])
++    assert.deepEqual(f.writes, [])
++    assert.equal(f.getOpenTerminalInfo().apiKey, null)
++  }
++})
++
++test('occupied standalone port fails before installing or mutating private settings', async () => {
++  const f = fixture(false)
++  f.dependencies.portInUse = async () => true
++  await assert.rejects(f.startOpenTerminal(), /already in use/)
++  assert.deepEqual(f.launches, [])
++  assert.deepEqual(f.writes, [])
++  assert.deepEqual(f.calls, [])
++})
++
++test('concurrent owned starts share one child and retain configured key outside argv', async () => {
++  const f = fixture(false)
++  const [left, right] = await Promise.all([f.startOpenTerminal(), f.startOpenTerminal()])
++  assert.equal(f.launches.length, 1)
++  assert.equal(left.pid, 42)
++  assert.equal(right.pid, 42)
++  assert.equal(f.launches[0].env.OPEN_TERMINAL_API_KEY, 'synthetic-key')
++  assert.equal(f.launches[0].env.OPEN_TERMINAL_API_KEY_FILE, undefined)
++  assert.equal(f.launches[0].env.open_terminal_api_key, undefined)
++  assert.equal(f.launches[0].args.includes('synthetic-key'), false)
++  assert.deepEqual(f.writes, [])
++  await f.stopOpenTerminal()
++  assert.deepEqual(f.calls.filter(Array.isArray), [['kill', false]])
++})
++
++test('new standalone key is generated once and preserves freshly read settings', async () => {
++  const f = fixture(false)
++  f.config.openTerminal.apiKey = ''
++  await f.startOpenTerminal()
++  assert.equal(f.calls.filter(value => value === 'generate-key').length, 1)
++  assert.deepEqual(f.writes, [{ openTerminal: { port: 39284, cwd: 'synthetic-home', apiKey: 'synthetic-generated' } }])
++  await f.stopOpenTerminal()
++})
++
++test('cancelled preparation finishes its installer without spawning or generating a replacement key', async () => {
++  const f = fixture(false)
++  let finish, entered
++  const installing = new Promise(resolve => { entered = resolve })
++  f.dependencies.isPackageInstalled = () => false
++  f.dependencies.installPackage = () => { entered(); return new Promise(resolve => { finish = resolve }) }
++  const pending = f.startOpenTerminal()
++  const rejection = assert.rejects(pending, /cancelled/)
++  await installing
++  const stopping = f.stopOpenTerminal()
++  finish(true)
++  await stopping
++  await rejection
++  assert.deepEqual(f.launches, [])
++  assert.deepEqual(f.writes, [])
++})
++
++test('owned Terminal output retains the shared byte bound for a single oversized chunk', async () => {
++  const f = fixture(false)
++  await f.startOpenTerminal()
++  f.child.output('界'.repeat(200000))
++  assert.ok(Buffer.byteLength(f.terminalService.logs) < 262200)
++  assert.ok(!f.terminalService.logs.includes('\ufffd'))
++  await f.stopOpenTerminal()
++})
++
++test('managed update invokes the guarded installer once; concurrent start shares the update and never spawns', async () => {
++  const f = fixture()
++  await f.startOpenTerminal()
++  let finish, entered
++  const installing = new Promise(resolve => { entered = resolve })
++  f.dependencies.installPackage = () => { f.calls.push('install-package'); entered(); return new Promise(resolve => { finish = resolve }) }
++  const update = f.updateOpenTerminal()
++  assert.equal(f.updateOpenTerminal(), update)
++  await installing
++  const start = f.startOpenTerminal()
++  assert.equal(start, update)
++  finish(true)
++  assert.equal((await update).status, 'started')
++  assert.equal((await start).apiKey, 'synthetic-key')
++  assert.deepEqual(f.calls, ['install-package'])
++  assert.deepEqual(f.launches, [])
++  assert.deepEqual(f.writes, [])
++})
++
++test('stop during an atomic update waits for its completion and prevents reattachment', async () => {
++  const f = fixture()
++  await f.startOpenTerminal()
++  let finish, entered
++  const installing = new Promise(resolve => { entered = resolve })
++  f.dependencies.installPackage = () => { entered(); return new Promise(resolve => { finish = resolve }) }
++  const update = f.updateOpenTerminal()
++  const rejection = assert.rejects(update, /cancelled/)
++  await installing
++  const stopping = f.stopOpenTerminal()
++  finish(true)
++  await stopping
++  await rejection
++  assert.equal(f.getOpenTerminalInfo().status, 'stopped')
++  assert.deepEqual(f.launches, [])
++  assert.deepEqual(f.writes, [])
++})
++
++test('failed installer is not retried, does not change key or spawn a fallback, and releases its barrier', async () => {
++  const f = fixture()
++  f.dependencies.installPackage = async () => { f.calls.push('install-package'); throw Error('synthetic update failure') }
++  await assert.rejects(f.updateOpenTerminal(), /update failure/)
++  assert.deepEqual(f.calls, ['install-package'])
++  assert.deepEqual(f.launches, [])
++  assert.deepEqual(f.writes, [])
++  assert.equal((await f.startOpenTerminal()).status, 'started')
++  assert.deepEqual(f.calls, ['install-package'])
++})
+diff --git a/.avx1/output-buffer.test.mjs b/.avx1/output-buffer.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..115e2fbfc4043666b5ec1bafb33441bcd3e02293
+--- /dev/null
++++ b/.avx1/output-buffer.test.mjs
+@@ -0,0 +1,13 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { OutputBuffer } from '../src/main/process/outputBuffer.ts';
++test('retained output is bounded even for one huge UTF8 chunk', () => {
++  const buffer = new OutputBuffer(1024);
++  buffer.append('я'.repeat(100000));
++  const text = buffer.read();
++  assert.ok(text.startsWith('[Earlier output omitted]'));
++  assert.ok(Buffer.byteLength(text) < 1100);
++  assert.ok(!text.includes('\ufffd'));
++  buffer.clear(); assert.equal(buffer.read(), '');
++  buffer.append('ready'); assert.equal(buffer.read(), 'ready');
++});
+diff --git a/.avx1/terminal-dock.test.mjs b/.avx1/terminal-dock.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..60eb1ec4777fed7f995e986e57a1683c192e4486
+--- /dev/null
++++ b/.avx1/terminal-dock.test.mjs
+@@ -0,0 +1,51 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++import ts from 'typescript'
++
++const component = readFileSync(new URL('../src/renderer/src/lib/components/Main/Connections/TerminalDock.svelte', import.meta.url), 'utf8')
++const tree = ts.createSourceFile('dock.ts', component.slice(component.indexOf('>') + 1, component.indexOf('</script>')), ts.ScriptTarget.Latest, true)
++const names = new Set(['canStop', 'isBusy', 'operate'])
++const functions = tree.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text))
++assert.equal(functions.length, 3)
++const code = stripTypeScriptTypes(functions.map(node => node.getText(tree)).join('\n'))
++function fixture() {
++  const selected = []
++  return new Function('select', `${code}; let pending = {}, errors = {};
++    return {operate, pending, errors};`)(id => selected.push(id))
++}
++
++test('external reconnect uses the running action once and rejects a duplicate click until completion', async () => {
++  const f = fixture()
++  let complete, calls = 0
++  const service = { id: 'open-terminal', status: 'started', pid: null, runningAction: 'reconnect',
++    onStart: () => { throw Error('Do not create a replacement') },
++    onRunningAction: () => { calls++; return new Promise(resolve => { complete = resolve }) } }
++  const pending = f.operate(service)
++  assert.equal(f.pending['open-terminal'], 'reconnect')
++  await f.operate(service)
++  assert.equal(calls, 1)
++  complete()
++  await pending
++  assert.equal(f.pending['open-terminal'], undefined)
++})
++
++test('failed starts leave an explicit error and release their pending action', async () => {
++  const f = fixture()
++  let calls = 0
++  await f.operate({ id: 'open-terminal', status: 'stopped', runningAction: 'stop',
++    onStart: async () => { calls++; throw Error('synthetic unavailable') } })
++  assert.equal(calls, 1)
++  assert.match(f.errors['open-terminal'], /synthetic unavailable/)
++  assert.equal(f.pending['open-terminal'], undefined)
++})
++
++test('a pending action on one service does not block a different service', async () => {
++  const f = fixture()
++  f.pending.server = 'restart'
++  let calls = 0
++  await f.operate({ id: 'open-terminal', status: 'stopped', runningAction: 'stop', onStart: async () => { calls++ } })
++  assert.equal(calls, 1)
++  assert.equal(f.pending.server, 'restart')
++})
+diff --git a/src/main/process/managedService.ts b/src/main/process/managedService.ts
+index e757365c241aa2b58cbb61c0a8867612a69751d0..222cb04a8eb85d5d5c5bd89c2752bedc3dd45793 100644
+--- a/src/main/process/managedService.ts
++++ b/src/main/process/managedService.ts
+@@ -17,6 +17,11 @@ export interface ServiceLaunch {
+   url: string
+   ready(signal: AbortSignal): Promise<void>
+ }
++export interface ExternalServiceLaunch {
++  external: true
++  url: string
++  ready(signal: AbortSignal): Promise<void>
++}
+ type ServiceEvent =
+   | { type: 'state'; info: ServiceInfo }
+   | { type: 'output'; data: string }
+@@ -88,7 +93,9 @@ export class ManagedService {
+     this.emit({ type: 'output', data })
+   }
+ 
+-  start(prepare: (signal: AbortSignal) => Promise<ServiceLaunch>): Promise<ServiceInfo> {
++  start(
++    prepare: (signal: AbortSignal) => Promise<ServiceLaunch | ExternalServiceLaunch>
++  ): Promise<ServiceInfo> {
+     if (this.closed) return Promise.reject(new Error('Service is shutting down'))
+     if (this.stopping) return this.stopping.then(() => this.start(prepare))
+     if (this.pending) return this.pending
+@@ -116,35 +123,43 @@ export class ManagedService {
+         signal.throwIfAborted()
+         const launch = await prepare(signal)
+         signal.throwIfAborted()
+-        const child = this.spawn(launch)
+-        run.child = child
+-        run.dispose.push(
+-          child.onData((data) => {
+-            if (this.run === run && !run.exited) this.append(data)
+-          }).dispose
+-        )
+-        run.dispose.push(
+-          child.onExit(({ exitCode, signal: exitSignal }) => {
+-            if (run.exited) return
+-            run.exited = true
+-            run.resolveExit()
+-            run.abort.abort(new Error(`Process exited with code ${exitCode}`))
+-            for (const dispose of run.dispose.splice(0)) dispose()
+-            if (this.run !== run) return
+-            this.append(
+-              `\r\n[Process exited with code ${exitCode}${exitSignal ? ` signal ${exitSignal}` : ''}]\r\n`
+-            )
+-            const failed = !run.stopRequested && (exitCode !== 0 || this.state.status !== 'started')
+-            this.update({
+-              pid: null,
+-              url: null,
+-              reachable: false,
+-              status: failed ? 'failed' : 'stopped',
+-              error: failed ? `Process exited with code ${exitCode}` : null
+-            })
+-          }).dispose
+-        )
+-        this.update({ pid: child.pid, url: launch.url })
++        // An independently owned backend has no child handle: observe readiness
++        // without gaining spawn, input or termination authority over it.
++        if ('external' in launch) {
++          this.append('[Server runs independently of Desktop]\r\n')
++          this.update({ pid: null, url: launch.url, external: true })
++        } else {
++          const child = this.spawn(launch)
++          run.child = child
++          run.dispose.push(
++            child.onData((data) => {
++              if (this.run === run && !run.exited) this.append(data)
++            }).dispose
++          )
++          run.dispose.push(
++            child.onExit(({ exitCode, signal: exitSignal }) => {
++              if (run.exited) return
++              run.exited = true
++              run.resolveExit()
++              run.abort.abort(new Error(`Process exited with code ${exitCode}`))
++              for (const dispose of run.dispose.splice(0)) dispose()
++              if (this.run !== run) return
++              this.append(
++                `\r\n[Process exited with code ${exitCode}${exitSignal ? ` signal ${exitSignal}` : ''}]\r\n`
++              )
++              const failed =
++                !run.stopRequested && (exitCode !== 0 || this.state.status !== 'started')
++              this.update({
++                pid: null,
++                url: null,
++                reachable: false,
++                status: failed ? 'failed' : 'stopped',
++                error: failed ? `Process exited with code ${exitCode}` : null
++              })
++            }).dispose
++          )
++          this.update({ pid: child.pid, url: launch.url })
++        }
+         // Race even a non-cooperative readiness probe against cancellation/exit.
+         await abortable(launch.ready(signal), signal)
+         signal.throwIfAborted()
+@@ -171,6 +186,7 @@ export class ManagedService {
+     this.pending = pending
+     this.clearLogs()
+     this.update({
++      external: false,
+       runId: run.id,
+       status: 'starting',
+       pid: null,
+diff --git a/src/main/process/outputBuffer.ts b/src/main/process/outputBuffer.ts
+index bcd454b13c7813179edb34ae9479caf3bff17c74..9bb3464f3751da8e5c62e8d9a4f062fcc58ba2e5 100644
+--- a/src/main/process/outputBuffer.ts
++++ b/src/main/process/outputBuffer.ts
+@@ -4,7 +4,9 @@ export class OutputBuffer {
+   private bytes = 0
+   private truncated = false
+ 
+-  constructor(private readonly limit = 256 * 1024) {}
++  private readonly limit: number
++
++  constructor(limit = 256 * 1024) { this.limit = limit }
+ 
+   append(data: string): void {
+     if (!data) return
+diff --git a/src/main/utils/index.ts b/src/main/utils/index.ts
+index f2f594a62c5570a1ad525d1195bd34eb77f14172..838be3b46e4240f04f9f7bf862cb792f0d72a236 100644
+--- a/src/main/utils/index.ts
++++ b/src/main/utils/index.ts
+@@ -1,5 +1,4 @@
+ // @ts-nocheck
+-
+ import * as fs from 'fs'
+ import * as os from 'os'
+ import * as path from 'path'
+@@ -133,7 +132,7 @@ export const getSecretKey = (keyPath?: string, key?: string): string => {
+ 
+ // ─── Port Utils ─────────────────────────────────────────
+ 
+-const portInUse = async (port: number, host: string): Promise<boolean> => {
++export const portInUse = async (port: number, host: string): Promise<boolean> => {
+   return new Promise((resolve, reject) => {
+     // Probe the bind address; connecting to 0.0.0.0 fails on Windows even for occupied ports.
+     const server = net.createServer((socket) => socket.destroy())
+@@ -187,7 +186,10 @@ const getArchString = () => {
+   return archMap[os.arch()] || 'x86_64'
+ }
+ 
++const pythonBuildPin = () => JSON.parse(fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'avx1-toolchains.json') : path.join(app.getAppPath(), '.avx1/toolchains.json'), 'utf8')).python
++
+ const generateDownloadUrl = () => {
++  if (os.platform() === 'win32' && os.arch() === 'x64') return pythonBuildPin().url
+   const baseUrl = 'https://github.com/astral-sh/python-build-standalone/releases/download'
+   const releaseDate = '20260310'
+   const pythonVersion = '3.12.13'
+@@ -313,6 +315,8 @@ const checkInternet = async () => {
+ 
+ export const installPython = async (installationDir?: string, onStatus?: (status: string) => void, signal?: AbortSignal): Promise<boolean> => {
+   const pythonDownloadPath = getPythonDownloadPath()
++  const runtimePin = process.platform === 'win32' && process.arch === 'x64' ? pythonBuildPin() : null
++  if (runtimePin && fs.existsSync(pythonDownloadPath) && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) fs.unlinkSync(pythonDownloadPath)
+   if (!fs.existsSync(pythonDownloadPath)) {
+     if (!(await checkInternet())) {
+       throw new Error(
+@@ -335,6 +339,7 @@ export const installPython = async (installationDir?: string, onStatus?: (status
+     return false
+   }
+ 
++  if (runtimePin && crypto.createHash('sha256').update(fs.readFileSync(pythonDownloadPath)).digest('hex') !== runtimePin.sha256) throw new Error('Контрольная сумма Python не совпала. Установка отменена.')
+   installationDir = installationDir || getPythonInstallationDir()
+   log.info(installationDir, pythonDownloadPath)
+ 
+@@ -420,7 +425,7 @@ export const getProcessEnv = (extra: Record<string, string> = {}): Record<string
+     value !== undefined && !/^(LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FORCE_FLAT_NAMESPACE|NODE_OPTIONS|NODE_PATH|ELECTRON_RUN_AS_NODE|ELECTRON_NO_ASAR|PYTHONINSPECT|PYTHONSTARTUP|PYTHONHOME)$/i.test(key)
+   ))
+ 
+-const pythonEnv = (extra: Record<string, string> = {}): Record<string, string> => {
++export const pythonEnv = (extra: Record<string, string> = {}): Record<string, string> => {
+   const base = getProcessEnv(extra)
+ 
+   if (process.platform === 'win32') {
+@@ -490,12 +495,49 @@ export const uninstallPython = (installationDir?: string): boolean => {
+ 
+ // ─── Package Management ─────────────────────────────────
+ 
++const installForkPackage = async (packageName: string, version?: string, onStatus?: (status: string) => void, signal?: AbortSignal): Promise<boolean> => {
++  signal?.throwIfAborted()
++  const project = packageName === 'open-webui' ? 'webui' : 'terminal'
++  const config = await getConfig()
++  const root = getInstallDir()
++  let interpreter = getPythonPath()
++  let script = app.isPackaged ? path.join(process.resourcesPath, 'fork_backend.py') : path.join(app.getAppPath(), '.avx1/fork_backend.py')
++  let argumentsList = ['-I', '-X', 'utf8', script, '--project', project, '--python', interpreter]
++  if (config.localServer?.managedBackend === true) {
++    script = path.join(root, 'maintenance/scripts/desktop_backend_update.py')
++    const receipt = path.join(root, 'maintenance/state/self-test.json')
++    if (!fs.existsSync(script) || !fs.existsSync(receipt)) throw new Error('Не найден контроллер управляемого backend. Используйте штатный запуск проекта.')
++    interpreter = JSON.parse(fs.readFileSync(receipt, 'utf8')).python
++    if (typeof interpreter !== 'string' || !fs.existsSync(interpreter)) throw new Error('Не найдена независимая среда контроллера обновлений.')
++    argumentsList = ['-X', 'utf8', '-B', script, '--project', project]
++  }
++  if (version) argumentsList.push('--tag', version)
++  onStatus?.('Установка проверенной оптимизированной сборки форка…')
++  const childEnvironment = pythonEnv()
++  delete childEnvironment.PYTHONHOME
++  delete childEnvironment.PYTHONPATH
++  return new Promise((resolve, reject) => {
++    const child = execFile(interpreter, argumentsList, { env: childEnvironment, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
++    let lastLine = ''
++    const status = (data: Buffer) => { const line = data.toString().trim(); if (line) { lastLine = line.split('\n').at(-1) || line; onStatus?.(lastLine) } }
++    child.stdout?.on('data', status)
++    child.stderr?.on('data', status)
++    child.on('error', reject)
++    child.on('exit', (code) => code === 0 ? resolve(true) : reject(new Error(lastLine || 'Не удалось установить сборку форка. Рабочая версия сохранена.')))
++  })
++}
++
+ let packageInstall: Promise<boolean> | undefined
+ const getIncompleteInstallPath = () => path.join(getPythonInstallationDir(), '.install-incomplete')
+ 
+ export const installPackage = (packageName: string, version?: string, onStatus?: (status: string) => void, signal?: AbortSignal): Promise<boolean> => {
+   if (packageInstall) return Promise.reject(new Error('A package installation is already in progress'))
+   if (webuiService.info.pid !== null) return Promise.reject(new Error('Stop Open WebUI before updating packages'))
++  if (packageName === 'open-webui' || packageName === 'open-terminal') {
++    packageInstall = installForkPackage(packageName, version, onStatus, signal)
++      .finally(() => { packageInstall = undefined })
++    return packageInstall
++  }
+   const marker = getIncompleteInstallPath()
+   const repair = fs.existsSync(marker)
+   packageInstall = new Promise<boolean>((resolve, reject) => {
+@@ -513,6 +555,8 @@ export const installPackage = (packageName: string, version?: string, onStatus?:
+         'uv',
+         'pip',
+         'install',
++        '--python',
++        pythonPath,
+         ...(repair ? ['--reinstall'] : []),
+         ...(version ? [`${packageName}==${version}`] : [packageName, '-U'])
+       ],
+@@ -582,7 +626,7 @@ export const isPackageInstalled = (packageName: string): boolean => {
+   const pythonPath = getPythonPath()
+   if (!fs.existsSync(pythonPath)) return false
+   try {
+-    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', packageName], {
++    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', '--python', pythonPath, packageName], {
+       encoding: 'utf-8',
+       env: pythonEnv()
+     })
+@@ -596,7 +640,7 @@ export const getPackageVersion = (packageName: string): string | null => {
+   const pythonPath = getPythonPath()
+   if (!fs.existsSync(pythonPath)) return null
+   try {
+-    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', packageName], {
++    const info = execFileSync(pythonPath, ['-m', 'uv', 'pip', 'show', '--python', pythonPath, packageName], {
+       encoding: 'utf-8',
+       env: pythonEnv()
+     })
+@@ -635,6 +679,22 @@ export const startServer = (onStatus?: (status: string) => void) => webuiService
+   await packageInstall
+   signal.throwIfAborted()
+   const config = await getConfig()
++  if (config.localServer?.managedBackend === true) {
++    // Preserve the qualified ASAR compatibility identifier on the real external path.
++    log.info('CODE_MANAGED_BACKEND_V1: observing independently managed backend')
++    const url = `http://127.0.0.1:${config.localServer?.port ?? 8080}`
++    return {
++      external: true as const, url,
++      ready: async (signal: AbortSignal) => {
++        const response = await electronNet.fetch(`${url}/health`, {
++          signal: AbortSignal.any([signal, AbortSignal.timeout(5000)])
++        })
++        if (!response.ok || (await response.json())?.status !== true) {
++          throw new Error('Managed backend is unavailable. Start it using the project launcher.')
++        }
++      }
++    }
++  }
+   const configEnvVars = config.envVars ?? {}
+   const expose = config.localServer?.serveOnLocalNetwork ?? false
+   const port = config.localServer?.port
+@@ -659,7 +719,7 @@ export const startServer = (onStatus?: (status: string) => void) => webuiService
+     throw new Error(`Python executable not found at: ${pythonPath}`)
+   }
+ 
+-  const commandArgs = ['-m', 'uv', 'run', 'open-webui', 'serve', '--host', host]
++  const commandArgs = ['-c', 'from open_webui import app; app()', 'serve', '--host', host]
+   const dataDir = getOpenWebUIDataPath()
+   const secretKey = getSecretKey()
+   if (!fs.existsSync(dataDir)) {
+@@ -681,20 +741,48 @@ export const startServer = (onStatus?: (status: string) => void) => webuiService
+   }
+ })
+ 
++export const validateRemoteUrl = async (url: string): Promise<boolean> => {
++  try {
++    const response = await electronNet.fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) })
++    return response.ok
++  } catch {
++    return false
++  }
++}
++
++export interface Connection {
++  id: string
++  name: string
++  type: 'local' | 'remote'
++  url: string
++}
++
+ export interface AppConfig {
++  language: string
+   version: number
++  defaultConnectionId: string | null
++  connections: Connection[]
+   automaticUpdates: boolean
+-  runInBackground: boolean
+   startMinimized: boolean
+   showMenuBarIcon: boolean
++  runInBackground: boolean
+   globalShortcut: string
++  spotlightShortcut: string
+   installDir: string
+   dataDir: string
+   localServer: {
+     port: number
+     serveOnLocalNetwork: boolean
++    managedBackend?: boolean
++    version?: string
+     autoUpdate: boolean
+   }
++  openTerminal: {
++    enabled: boolean
++    port: number
++    cwd: string
++    apiKey: string
++  }
+   llamaCpp: {
+     enabled: boolean
+     port: number
+@@ -705,17 +793,28 @@ export interface AppConfig {
+   }
+   ollama: { enabled: boolean; port: number; version: string }
+   envVars: Record<string, string>
++  showSidebar: boolean
++  spotlightPosition: { x: number; y: number } | null
++  spotlightClipboardPaste: boolean
++  voiceInputShortcut: string
++  voiceInputEnabled: boolean
++  callShortcut: string
++  callEnabled: boolean
+   windowBounds: { x: number; y: number; width: number; height: number } | null
+   windowMaximized: boolean
+ }
+ 
+ const DEFAULT_CONFIG: AppConfig = {
++  language: 'ru-RU',
+   version: 1,
++  defaultConnectionId: null,
++  connections: [],
+   automaticUpdates: false,
+-  runInBackground: true,
+   startMinimized: false,
+   showMenuBarIcon: true,
+-  globalShortcut: 'CommandOrControl+Shift+O',
++  runInBackground: true,
++  globalShortcut: 'Alt+CommandOrControl+O',
++  spotlightShortcut: 'Shift+CommandOrControl+I',
+   installDir: '',
+   dataDir: '',
+   localServer: {
+@@ -723,6 +822,11 @@ const DEFAULT_CONFIG: AppConfig = {
+     serveOnLocalNetwork: false,
+     autoUpdate: true
+   },
++  openTerminal: {
++    enabled: false,
++    cwd: '',
++    apiKey: ''
++  },
+   llamaCpp: {
+     enabled: false,
+     version: 'latest',
+@@ -731,6 +835,13 @@ const DEFAULT_CONFIG: AppConfig = {
+   },
+   ollama: { enabled: false, port: 11434, version: 'latest' },
+   envVars: {},
++  showSidebar: false,
++  spotlightPosition: null,
++  spotlightClipboardPaste: true,
++  voiceInputShortcut: 'Shift+CommandOrControl+Space',
++  voiceInputEnabled: true,
++  callShortcut: 'Shift+CommandOrControl+C',
++  callEnabled: true,
+   windowBounds: null,
+   windowMaximized: false
+ }
+diff --git a/src/main/utils/llamacpp.ts b/src/main/utils/llamacpp.ts
+index 611e933f6cd6b49e809589827305b11c5794dfd7..4c5310eb5b16e9c395c99cb06bb446e077257b40 100644
+--- a/src/main/utils/llamacpp.ts
++++ b/src/main/utils/llamacpp.ts
+@@ -490,24 +490,24 @@ export const checkLlamaCppUpdate = async (): Promise<{ currentVersion: string |
+     const releaseData = await fetchLlamaRelease('latest', AbortSignal.timeout(5000))
+     const latestVersion = releaseData.tag_name
+     const currentVersion = currentInfo.version
+-    
++
+     if (!currentVersion) {
+       return { currentVersion: null, latestVersion, updateAvailable: true }
+     }
+-    
+-    return { 
+-      currentVersion, 
+-      latestVersion, 
++
++    return {
++      currentVersion,
++      latestVersion,
+       updateAvailable: /^b\d+$/.test(currentVersion) && /^b\d+$/.test(latestVersion)
+         ? Number(currentVersion.slice(1)) < Number(latestVersion.slice(1))
+         : currentVersion !== latestVersion
+     }
+   } catch (error) {
+     log.error('Failed to check for llama.cpp updates:', error)
+-    return { 
+-      currentVersion: currentInfo.version, 
+-      latestVersion: null, 
+-      updateAvailable: false 
++    return {
++      currentVersion: currentInfo.version,
++      latestVersion: null,
++      updateAvailable: false
+     }
+   }
+ }
+@@ -536,7 +536,7 @@ export const updateLlamaCpp = async (
+   // Stop if running.
+   await stopLlamaCpp()
+   await setupTask?.catch(() => {})
+-  
++
+   // Target this release explicitly so setup cannot reuse an older cached version.
+   // Keep installed binaries available if downloading the replacement fails.
+   onStatus?.('Downloading update…')
+@@ -544,7 +544,7 @@ export const updateLlamaCpp = async (
+ 
+   const config = await getConfig()
+   await setConfig({ llamaCpp: { ...config.llamaCpp, version: 'latest' } })
+-  
++
+   return getLlamaCppInfo()
+ }
+ 
+diff --git a/src/main/utils/open-terminal.ts b/src/main/utils/open-terminal.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c4a252741a6cc6e74082b64cc2fd0581b9a2b8f
+--- /dev/null
++++ b/src/main/utils/open-terminal.ts
+@@ -0,0 +1,126 @@
++import crypto from 'node:crypto'
++import os from 'node:os'
++import log from 'electron-log'
++import { ManagedService, waitForReady } from '../process/managedService'
++import { spawnPty } from '../process/nativePty'
++import {
++  getPythonPath, getConfig, setConfig, installPackage, isPackageInstalled,
++  isPythonInstalled, installPython, portInUse, pythonEnv
++} from './index'
++
++export const terminalService = new ManagedService(spawnPty)
++let apiKey: string | null = null
++let updateGeneration = 0
++let updatePending: Promise<ReturnType<typeof getOpenTerminalInfo>> | undefined
++
++terminalService.subscribe(event => {
++  if (event.type === 'state' && ['stopped', 'failed'].includes(event.info.status)) apiKey = null
++})
++
++export const getOpenTerminalInfo = () => ({
++  ...terminalService.info,
++  apiKey: terminalService.info.reachable ? apiKey : null
++})
++
++async function authenticatedReady(url: string, key: string, signal: AbortSignal): Promise<boolean> {
++  const response = await fetch(`${url}/api/health`, {
++    headers: { Authorization: `Bearer ${key}` },
++    redirect: 'error', signal
++  })
++  if (!response.ok) return false
++  return (await response.json())?.status === 'ok'
++}
++
++async function startTerminal(port: number | null, onStatus: ((status: string) => void) | undefined, upgrade = false) {
++  await terminalService.start(async signal => {
++    let config = await getConfig()
++    const desiredPort = port ?? config.openTerminal?.port ?? 39284
++    if (!Number.isInteger(desiredPort) || desiredPort < 1 || desiredPort > 65535) {
++      throw new Error('Invalid Open Terminal port')
++    }
++    const url = `http://127.0.0.1:${desiredPort}`
++    if (config.localServer?.managedBackend === true) {
++      let key = config.openTerminal?.apiKey
++      if (typeof key !== 'string' || !key) throw new Error('Managed Open Terminal credentials are unavailable')
++      if (upgrade) {
++        await installPackage('open-terminal', undefined, onStatus, signal)
++        signal.throwIfAborted()
++        config = await getConfig()
++        if (config.localServer?.managedBackend !== true || (config.openTerminal?.port ?? 39284) !== desiredPort) {
++          throw new Error('Open Terminal configuration changed during update')
++        }
++        key = config.openTerminal?.apiKey
++        if (typeof key !== 'string' || !key) throw new Error('Managed Open Terminal credentials are unavailable')
++      }
++      apiKey = key
++      return {
++        external: true as const, url,
++        ready: async (signal: AbortSignal) => {
++          if (!await authenticatedReady(url, key, AbortSignal.any([signal, AbortSignal.timeout(5000)]))) {
++            throw new Error('Managed Open Terminal is unavailable or needs the current authenticated health endpoint. Use the project launcher.')
++          }
++        }
++      }
++    }
++    // An occupied configured port is not authority to create another instance.
++    if (await portInUse(desiredPort, '127.0.0.1')) throw new Error('Open Terminal port is already in use')
++    signal.throwIfAborted()
++    if (!isPythonInstalled() && !await installPython(undefined, onStatus, signal)) {
++      throw new Error('Python installation failed')
++    }
++    if (upgrade || !isPackageInstalled('open-terminal')) await installPackage('open-terminal', undefined, onStatus, signal)
++    signal.throwIfAborted()
++    // Re-read before saving a newly generated key, preserving concurrent settings.
++    const fresh = await getConfig()
++    if (fresh.localServer?.managedBackend === true || (port ?? fresh.openTerminal?.port ?? 39284) !== desiredPort) {
++      throw new Error('Open Terminal configuration changed during update')
++    }
++    let key = fresh.openTerminal?.apiKey
++    if (!key) {
++      key = crypto.randomBytes(24).toString('base64url')
++      await setConfig({ openTerminal: { ...fresh.openTerminal, apiKey: key } })
++    }
++    if (typeof key !== 'string') throw new Error('Invalid Open Terminal credentials')
++    apiKey = key
++    const env = pythonEnv(fresh.envVars ?? {})
++    for (const name of Object.keys(env)) {
++      if (/^OPEN_TERMINAL_API_KEY(?:_FILE)?$/i.test(name)) delete env[name]
++    }
++    env.OPEN_TERMINAL_API_KEY = key
++    env.PYTHONUNBUFFERED = '1'
++    onStatus?.('Starting Open Terminal…')
++    log.info('Starting owned Open Terminal at configured loopback port')
++    return {
++      file: getPythonPath(),
++      args: ['-c', 'from open_terminal.cli import main; main()', 'run', '--host', '127.0.0.1',
++        '--port', String(desiredPort), '--cwd', fresh.openTerminal?.cwd || os.homedir()],
++      env, url,
++      ready: (signal: AbortSignal) => waitForReady(probe => authenticatedReady(url, key, probe), signal)
++    }
++  })
++  return getOpenTerminalInfo()
++}
++
++export function startOpenTerminal(port: number | null = null, onStatus?: (status: string) => void) {
++  return updatePending ?? startTerminal(port, onStatus)
++}
++
++export function updateOpenTerminal(onStatus?: (status: string) => void) {
++  if (updatePending) return updatePending
++  const generation = ++updateGeneration
++  // Reserve before stopping; concurrent starts/updates share this transaction.
++  const pending = Promise.resolve().then(async () => {
++    await terminalService.stop()
++    if (generation !== updateGeneration) throw new Error('Open Terminal update cancelled')
++    // The shared lifecycle owns preparation: stop/shutdown waits for the atomic
++    // installer and prevents spawning or attaching after cancellation.
++    return startTerminal(null, onStatus, true)
++  }).finally(() => { if (updatePending === pending) updatePending = undefined })
++  updatePending = pending
++  return pending
++}
++
++export function stopOpenTerminal() {
++  updateGeneration++
++  return terminalService.stop()
++}
+diff --git a/src/renderer/src/lib/components/Main/Connections/TerminalDock.svelte b/src/renderer/src/lib/components/Main/Connections/TerminalDock.svelte
+index b32f47e90abfe8bba5cf8e2cbfd24a791863c612..c3744f28cf51bcfc6d307b9de0c80fe454fd8a1d 100644
+--- a/src/renderer/src/lib/components/Main/Connections/TerminalDock.svelte
++++ b/src/renderer/src/lib/components/Main/Connections/TerminalDock.svelte
+@@ -23,10 +23,12 @@
+     detail?: string | null
+     browserUrl?: string | null
+     onStart: () => Promise<unknown>
+-    runningAction: 'stop' | 'restart'
++    runningAction: 'stop' | 'restart' | 'reconnect'
+     onRunningAction: () => Promise<unknown>
+   }
+-  let { services, onOpenSettings, onRefresh, canRefresh }: {
++  let { services, onOpenSettings, onRefresh, canRefresh, onToggleSidebar, sidebarOpen = true }: {
++    onToggleSidebar?: () => void
++    sidebarOpen?: boolean
+     services: Service[]
+     onOpenSettings: () => void
+     onRefresh: () => void
+@@ -37,7 +39,7 @@
+   let visited = $state<ServiceId[]>([])
+   let panelHeight = $state(160)
+   let terminalViews: Partial<Record<ServiceId, TerminalView>> = {}
+-  let pending = $state<Partial<Record<ServiceId, 'start' | 'stop' | 'restart'>>>({})
++  let pending = $state<Partial<Record<ServiceId, 'start' | 'stop' | 'restart' | 'reconnect'>>>({})
+   let errors = $state<Partial<Record<ServiceId, string>>>({})
+   let copied = $state(false)
+   let copyTimer: ReturnType<typeof setTimeout> | undefined
+@@ -51,8 +53,8 @@
+   function isBusy(service: Service): boolean {
+     return (
+       pending[service.id] === 'stop' ||
+-      pending[service.id] === 'restart' ||
+-      (service.runningAction === 'restart' &&
++      (pending[service.id] === 'restart' || pending[service.id] === 'reconnect') ||
++      (['restart', 'reconnect'].includes(service.runningAction) &&
+         (service.status === 'starting' || pending[service.id] === 'start')) ||
+       (pending[service.id] === 'start' && !canStop(service)) ||
+       service.status === 'stopping' ||
+@@ -196,6 +198,12 @@
+     ></div>
+   {/if}
+   <div class="terminal-bar">
++    {#if onToggleSidebar}
++      <button type="button" class="settings-button" onclick={onToggleSidebar}
++        aria-expanded={sidebarOpen} aria-label={$i18n.t('connections.toggleSidebar')}>
++        <span aria-hidden="true">☰</span>
++      </button>
++    {/if}
+     <button type="button" class="settings-button" onclick={onOpenSettings}
+       ><span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full size-[12px]"
+         >{@html SettingsIcon}</span
+diff --git a/src/renderer/src/lib/components/Main/Settings/InferenceRuntime.svelte b/src/renderer/src/lib/components/Main/Settings/InferenceRuntime.svelte
+index 173d12c70b363574424dd104ea30ad98f43a5880..558691bb8216ddf73dd0b54ba91fb36a788564f6 100644
+--- a/src/renderer/src/lib/components/Main/Settings/InferenceRuntime.svelte
++++ b/src/renderer/src/lib/components/Main/Settings/InferenceRuntime.svelte
+@@ -11,7 +11,7 @@
+   import i18n from '../../../i18n'
+   import Switch from '../../common/Switch.svelte'
+ 
+-  let lsInfo = $state<{ url?: string; status?: string; pid?: number; binaryPath?: string } | null>(null)
++  let lsInfo = $state<{ url?: string; status?: string; pid?: number; binaryPath?: string; version?: string } | null>(null)
+   let stopping = $state(false)
+   let starting = $state(false)
+   let restarting = $state(false)
+@@ -25,7 +25,7 @@
+   let archiveDraft = $state<string | null>(null)
+ 
+   $effect(() => {
+-    if (!advancedOpen) return
++    if (!advancedOpen) return undefined
+     const variant = $config?.llamaCpp?.variant ?? 'auto'
+     let cancelled = false
+     defaultAssetName = ''
+@@ -118,7 +118,7 @@
+     starting = true
+     setupStatus = ''
+     try {
+-      const result = await window.electronAPI.startLlamaCpp()
++      await window.electronAPI.startLlamaCpp()
+       lsInfo = await window.electronAPI.getLlamaCppInfo()
+     } catch (e) {
+       console.error('Failed to start llama-server:', e)
+@@ -175,37 +175,9 @@
+     }
+   }
+ 
+-  const downloadModel = async () => {
+-    if (!downloadRepo.trim() || !downloadFile.trim()) return
+-    downloading = true
+-    downloadProgress = 0
+-    try {
+-      await window.electronAPI.downloadHfModel(downloadRepo.trim(), downloadFile.trim())
+-    } catch (e) {
+-      console.error('Failed to download model:', e)
+-      downloading = false
+-    }
+-  }
+-
+-  const removeModel = async (repo: string, filename: string) => {
+-    deleting = `${repo}/${filename}`
+-    try {
+-      await window.electronAPI.deleteHfModel(repo, filename)
+-      models = await window.electronAPI.listHfModels()
+-    } catch (e) {
+-      console.error('Failed to delete model:', e)
+-    }
+-    deleting = null
+-  }
+-
+   const installed = $derived(!!lsInfo?.binaryPath)
+ 
+-  const formatSize = (bytes: number): string => {
+-    if (bytes < 1024) return `${bytes} B`
+-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+-  }
++
+ </script>
+ 
+ {#snippet archiveFilename()}
+diff --git a/src/renderer/src/lib/components/Main/Settings/OpenTerminal.svelte b/src/renderer/src/lib/components/Main/Settings/OpenTerminal.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ef71f40fd053fceb846989a168ad0d834e1c90b
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Settings/OpenTerminal.svelte
+@@ -0,0 +1,373 @@
++<script lang="ts">
++  import { onMount } from 'svelte'
++  import { config } from '../../../stores'
++  import i18n from '../../../i18n'
++  import Switch from '../../common/Switch.svelte'
++
++  let otInfo = $state<{ url?: string; apiKey?: string; status?: string; pid?: number; error?: string } | null>(null)
++  let otApiKeyCopied = $state(false)
++  let version = $state<string | null>(null)
++  let stopping = $state(false)
++  let starting = $state(false)
++  let restarting = $state(false)
++  let updating = $state(false)
++  let loaded = $state(false)
++  let uninstalling = $state(false)
++  let installing = $state(false)
++  let operationError = $state('')
++  const busy = $derived(stopping || starting || restarting || updating || installing || uninstalling)
++
++  onMount(async () => {
++    otInfo = await window.electronAPI.getOpenTerminalInfo()
++    version = await window.electronAPI.getPackageVersion('open-terminal')
++    loaded = true
++  })
++
++  const installed = $derived(version !== null)
++
++  const isRunning = $derived(otInfo?.status === 'started')
++  const managed = $derived($config?.localServer?.managedBackend === true)
++
++  const updateOtConfig = async (key: string, value: any) => {
++    const current = $config ?? {}
++    const openTerminal = { ...(current.openTerminal ?? {}), [key]: value }
++    await window.electronAPI.setConfig({ openTerminal })
++    config.set(await window.electronAPI.getConfig())
++  }
++
++  const stopTerminal = async () => {
++    if (busy) return
++    operationError = ''
++    stopping = true
++    try {
++      await window.electronAPI.stopOpenTerminal()
++      otInfo = await window.electronAPI.getOpenTerminalInfo()
++    } catch (e) {
++      operationError = e instanceof Error ? e.message : String(e)
++    }
++    stopping = false
++  }
++
++  const startTerminal = async () => {
++    if (busy) return
++    operationError = ''
++    starting = true
++    try {
++      const result = await window.electronAPI.startOpenTerminal()
++      otInfo = await window.electronAPI.getOpenTerminalInfo()
++      if (!result) throw new Error(otInfo?.error || $i18n.t('error.terminalStartFailed'))
++    } catch (e) {
++      operationError = e instanceof Error ? e.message : String(e)
++    }
++    starting = false
++  }
++
++  const restartTerminal = async () => {
++    if (busy) return
++    operationError = ''
++    restarting = true
++    try {
++      await window.electronAPI.stopOpenTerminal()
++      const result = await window.electronAPI.startOpenTerminal()
++      otInfo = await window.electronAPI.getOpenTerminalInfo()
++      if (!result) throw new Error(otInfo?.error || $i18n.t('error.terminalStartFailed'))
++    } catch (e) {
++      operationError = e instanceof Error ? e.message : String(e)
++    }
++    restarting = false
++  }
++
++  const updatePackage = async () => {
++    if (busy) return
++    updating = true
++    operationError = ''
++    try {
++      otInfo = await window.electronAPI.updateOpenTerminal()
++      version = await window.electronAPI.getPackageVersion('open-terminal')
++    } catch (error) {
++      operationError = error instanceof Error ? error.message : String(error)
++      otInfo = await window.electronAPI.getOpenTerminalInfo()
++    } finally { updating = false }
++  }
++
++  const copyOtApiKey = async () => {
++    if (otInfo?.apiKey) {
++      await navigator.clipboard.writeText(otInfo.apiKey)
++      otApiKeyCopied = true
++      setTimeout(() => { otApiKeyCopied = false }, 2000)
++    }
++  }
++</script>
++
++{#if operationError}<p role="alert" class="text-sm text-red-600 dark:text-red-400">{operationError}</p>{/if}
++
++{#if !loaded}
++  <div class="py-6 text-[12px] opacity-20 text-center">{$i18n.t('common.loading')}</div>
++{:else if !installed}
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-40">{$i18n.t('settings.terminal.notInstalled')}</div>
++      <div class="text-[11px] opacity-20 mt-0.5">{$i18n.t('settings.terminal.notInstalledDesc')}</div>
++    </div>
++    <button
++      class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {installing ? 'pointer-events-none opacity-20' : ''}"
++      disabled={busy}
++      onclick={async () => {
++        installing = true
++        try {
++          otInfo = await window.electronAPI.updateOpenTerminal()
++          version = await window.electronAPI.getPackageVersion('open-terminal')
++        } catch (e) {
++          operationError = e instanceof Error ? e.message : String(e)
++        }
++        installing = false
++      }}
++    >
++      {#if installing}
++        <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++        {$i18n.t('common.installing')}
++      {:else}
++        {$i18n.t('common.install')}
++      {/if}
++    </button>
++  </div>
++{:else}
++<div class="flex flex-col divide-y divide-white/[0.04]">
++  <!-- Server status & controls -->
++  <div class="py-4">
++    <div class="flex items-center justify-between mb-3">
++      <div>
++        <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.server')}</div>
++        <div class="text-[11px] opacity-25 mt-0.5">
++          {#if version}v{version} · {/if}{$i18n.t('settings.terminal.instance')}
++        </div>
++      </div>
++      <div class="flex items-center gap-1.5">
++        {#if isRunning}
++          <div class="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>
++          <span class="text-[12px] opacity-50">{$i18n.t('common.running')}</span>
++        {:else if otInfo?.status === 'stopped' || !otInfo?.status}
++          <div class="w-1.5 h-1.5 rounded-full bg-black/15 dark:bg-white/20"></div>
++          <span class="text-[12px] opacity-30">{$i18n.t('common.stopped')}</span>
++        {:else}
++          <div class="w-1.5 h-1.5 rounded-full bg-amber-400/60"></div>
++          <span class="text-[12px] opacity-30 capitalize">{otInfo?.status}</span>
++        {/if}
++      </div>
++    </div>
++
++    <div class="flex items-center gap-2">
++      {#if isRunning}
++        <button
++          class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {stopping ? 'pointer-events-none opacity-20' : ''}"
++          disabled={busy}
++          onclick={stopTerminal}
++        >
++          {#if stopping}
++            <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++            {$i18n.t('common.stopping')}
++          {:else}
++            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++              <path stroke-linecap="round" stroke-linejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
++            </svg>
++            {$i18n.t('common.stop')}
++          {/if}
++        </button>
++        <button
++          class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {restarting ? 'pointer-events-none opacity-20' : ''}"
++          disabled={busy}
++          onclick={restartTerminal}
++        >
++          {#if restarting}
++            <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++            {$i18n.t('common.restarting')}
++          {:else}
++            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++              <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M20.015 4.356v4.992m0 0h-4.992m4.993 0l-3.181-3.183a8.25 8.25 0 00-13.803 3.7" />
++            </svg>
++            {$i18n.t($config?.localServer?.managedBackend ? 'common.reconnect' : 'common.restart')}
++          {/if}
++        </button>
++      {:else}
++        <button
++          class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {starting ? 'pointer-events-none opacity-20' : ''}"
++          disabled={busy}
++          onclick={startTerminal}
++        >
++          {#if starting}
++            <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++            {$i18n.t('common.starting')}
++          {:else}
++            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++              <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 010 1.972l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z" />
++            </svg>
++            {$i18n.t('common.start')}
++          {/if}
++        </button>
++      {/if}
++
++      <button
++        class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {updating ? 'pointer-events-none opacity-20' : ''}"
++        disabled={busy}
++        onclick={updatePackage}
++      >
++        {#if updating}
++          <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++          {$i18n.t('common.updating')}
++        {:else}
++          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
++          </svg>
++          {$i18n.t('common.update')}
++        {/if}
++      </button>
++    </div>
++  </div>
++
++  <!-- Running Instance Info -->
++  {#if isRunning && otInfo}
++    <div class="py-4">
++      <div class="text-[13px] opacity-70 mb-3">{$i18n.t('settings.terminal.runningInstance')}</div>
++      <div class="flex flex-col gap-2">
++        <div class="flex items-center justify-between">
++          <span class="text-[11px] opacity-30">URL</span>
++          <button class="text-[12px] opacity-50 font-mono hover:opacity-80 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0 underline decoration-dotted underline-offset-2 cursor-pointer" onclick={() => window.open(otInfo.url)}>{otInfo.url}</button>
++        </div>
++        {#if otInfo.pid}
++        <div class="flex items-center justify-between">
++          <span class="text-[11px] opacity-30">PID</span>
++          <span class="text-[12px] opacity-50 font-mono">{otInfo.pid}</span>
++        </div>
++        {/if}
++      </div>
++    </div>
++  {/if}
++
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.startOnLaunch')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">
++        {$i18n.t('settings.terminal.startOnLaunchDesc')}
++      </div>
++    </div>
++    <Switch
++      checked={$config?.openTerminal?.enabled ?? false}
++      label={$i18n.t('settings.terminal.toggleStartOnLaunch')}
++      onchange={(value) => updateOtConfig('enabled', value)}
++    />
++  </div>
++
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.port')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.terminal.portDesc')}</div>
++    </div>
++    <input
++      type="number"
++      class="bg-black/[0.04] dark:bg-white/[0.06] text-[12px] text-[#1d1d1f] dark:text-[#fafafa] px-3 py-1.5 border-none outline-none rounded-xl opacity-60 w-20 text-right"
++      value={$config?.openTerminal?.port ?? 8000}
++      onchange={(e) =>
++        updateOtConfig('port', parseInt((e.target as HTMLInputElement).value) || 8000)}
++    />
++  </div>
++
++  <div class="py-4 flex items-center justify-between gap-4">
++    <div class="shrink-0">
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.workingDirectory')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.terminal.workingDirectoryDesc')}</div>
++    </div>
++    <div class="flex items-center gap-1.5 min-w-0 flex-1 max-w-[280px] justify-end">
++      <input
++        type="text"
++        class="bg-black/[0.04] dark:bg-white/[0.06] text-[12px] text-[#1d1d1f] dark:text-[#fafafa] px-3 py-1.5 border-none outline-none rounded-xl opacity-60 min-w-0 flex-1 text-right font-mono"
++        placeholder={$i18n.t('settings.terminal.workingDirectoryPlaceholder')}
++        value={$config?.openTerminal?.cwd ?? ''}
++        onchange={(e) =>
++          updateOtConfig('cwd', (e.target as HTMLInputElement).value.trim())}
++      />
++      <button
++        class="shrink-0 text-[12px] opacity-40 hover:opacity-70 px-2.5 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++        onclick={async () => {
++          const folder = await window.electronAPI.selectFolder()
++          if (folder) updateOtConfig('cwd', folder)
++        }}
++      >
++        {$i18n.t('common.browse')}
++      </button>
++    </div>
++  </div>
++
++  {#if isRunning && otInfo}
++    <div class="py-4">
++      <div class="text-[13px] opacity-70 mb-3">{$i18n.t('settings.terminal.runningInstance')}</div>
++      <div class="flex flex-col gap-2">
++        <div class="flex items-center justify-between">
++          <span class="text-[11px] opacity-30">URL</span>
++          <button class="text-[12px] opacity-50 font-mono hover:opacity-80 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0 underline decoration-dotted underline-offset-2 cursor-pointer" onclick={() => window.open(otInfo.url)}>{otInfo.url}</button>
++        </div>
++        <div class="flex items-center justify-between">
++          <span class="text-[11px] opacity-30">API Key</span>
++          <div class="flex items-center gap-1.5">
++            <span class="text-[12px] opacity-50 font-mono">{otInfo.apiKey?.slice(0, 12)}…</span>
++            <button
++              class="text-[10px] opacity-30 hover:opacity-60 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++              onclick={copyOtApiKey}
++            >
++              {otApiKeyCopied ? $i18n.t('common.copied') : $i18n.t('common.copy')}
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++  {/if}
++
++  <!-- Version Pin -->
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.version')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.terminal.versionDesc')}</div>
++    </div>
++    <input
++      type="text"
++      class="bg-black/[0.04] dark:bg-white/[0.06] text-[12px] text-[#1d1d1f] dark:text-[#fafafa] px-3 py-1.5 border-none outline-none rounded-xl opacity-60 w-28 text-right font-mono"
++      placeholder="latest"
++      value={$config?.openTerminal?.version ?? ''}
++      onchange={(e) => updateOtConfig('version', (e.target as HTMLInputElement).value.trim())}
++    />
++  </div>
++
++  <!-- Uninstall -->
++  <div class="py-4 flex items-center justify-between">
++    <div>
++      <div class="text-[13px] opacity-70">{$i18n.t('settings.terminal.uninstall')}</div>
++      <div class="text-[11px] opacity-25 mt-0.5">{$i18n.t('settings.terminal.uninstallDesc')}</div>
++    </div>
++    <button
++      class="text-[12px] opacity-40 hover:opacity-70 px-3 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl flex items-center gap-1.5 {uninstalling ? 'pointer-events-none opacity-20' : ''}"
++      disabled={busy || managed}
++      title={managed ? $i18n.t('settings.terminal.managedPackage') : undefined}
++      onclick={async () => {
++        if (confirm($i18n.t('settings.terminal.uninstallConfirm'))) {
++          uninstalling = true
++          try {
++            if (isRunning) await window.electronAPI.stopOpenTerminal()
++            await window.electronAPI.uninstallPackage('open-terminal')
++            version = null
++            otInfo = null
++          } catch (e) {
++            console.error('Failed to uninstall:', e)
++          }
++          uninstalling = false
++        }
++      }}
++    >
++      {#if uninstalling}
++        <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"></div>
++        {$i18n.t('common.uninstalling')}
++      {:else}
++        {$i18n.t('common.uninstall')}
++      {/if}
++    </button>
++  </div>
++</div>
++{/if}
+diff --git a/src/shared/terminal.ts b/src/shared/terminal.ts
+index a1eed96440e13a9bd1ab376945527b6f1ad5709a..cf78c3977d50f4f316a897fa50fe7dd3439bb789 100644
+--- a/src/shared/terminal.ts
++++ b/src/shared/terminal.ts
+@@ -1,10 +1,11 @@
+-export type ServiceId = 'server' | 'llamacpp' | 'ollama'
++export type ServiceId = 'server' | 'llamacpp' | 'open-terminal' | 'ollama'
+ export type ServiceStatus = 'starting' | 'started' | 'stopping' | 'stopped' | 'failed'
+ export interface ServiceInfo {
+   runId: number
+   status: ServiceStatus
+   pid: number | null
+   url: string | null
++  external?: boolean
+   reachable: boolean
+   error: string | null
+ }

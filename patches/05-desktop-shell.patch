@@ -1,0 +1,4722 @@
+diff --git a/.avx1/frontend_contract.py b/.avx1/frontend_contract.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc188a09745488f9164a3e531688af7196d60837
+--- /dev/null
++++ b/.avx1/frontend_contract.py
+@@ -0,0 +1,32 @@
++"""Attest the reviewed source-level assistant hooks after a normal frontend build."""
++import hashlib
++import json
++from pathlib import Path
++import subprocess
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def digest(path):
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def main():
++    contract = json.loads((ROOT / ".avx1/frontend-contract.json").read_text("utf-8"))
++    for name, expected in contract["sources"].items():
++        actual = hashlib.sha256((ROOT / name).read_text('utf-8').encode('utf-8')).hexdigest()
++        if actual != expected:
++            raise RuntimeError("Assistant source hook changed; review and tests required: " + name)
++    assets = ROOT / "build"
++    if not (assets / "index.html").is_file():
++        raise RuntimeError("Frontend output missing")
++    proof = {"schema": 1, "name": "owui-ivybridge-assistant-v1", "hooks": contract["hooks"],
++             "helper_sha256": contract["helper_sha256"], "sources": contract["sources"],
++             "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
++             "assets": {path.relative_to(assets).as_posix(): digest(path) for path in sorted(assets.rglob("*"))
++                        if path.is_file() and path.suffix in {".js", ".html"}}}
++    (assets / "assistant-compatibility.json").write_text(json.dumps(proof, indent=2)+"\n", encoding="utf-8")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/.avx1/frontend_contract.test.mjs b/.avx1/frontend_contract.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e502d53fc1a0cfeaf64474a5073c3697d903bc7
+--- /dev/null
++++ b/.avx1/frontend_contract.test.mjs
+@@ -0,0 +1,35 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { __assistantMicOrigin as mic, __assistantVoiceBudget as voice } from '../src/lib/utils/assistantCompatibility.js';
++
++test('microphone provenance stays on the exact current draft and clears on replacement', () => {
++  let callbacks = {};
++  let node = {textContent: 'voice', innerText: 'voice', contains: () => true, addEventListener: (name, handler) => callbacks[name] = handler};
++  globalThis.document = {getElementById: () => node};
++  globalThis.getSelection = () => ({isCollapsed: false, anchorNode: node, focusNode: node, toString: () => 'voice'});
++  mic.mark('voice');
++  assert.deepEqual(mic.peek('voice'), {input_source: 'microphone'});
++  assert.equal(mic.peek('unrelated typed message'), undefined);
++  mic.change('voice edited');
++  assert.deepEqual(mic.peek('voice edited'), {input_source: 'microphone'});
++  callbacks.beforeinput();
++  assert.equal(mic.peek('voice edited'), undefined);
++  mic.mark('voice');
++  node = {...node};
++  assert.equal(mic.peek('voice'), undefined);
++});
++
++test('voice budget groups reports, stays message-scoped and preserves full text', () => {
++  voice.start('one', 1);
++  voice.start('two', 1);
++  assert.equal(voice.hold('one', '1С: выручка 100'), true);
++  assert.equal(voice.hold('two', 'Hello'), false);
++  assert.equal(voice.hold('one', 'Прибыль 20'), true);
++  const report = voice.finish('one', 'chat-one');
++  assert.equal(report.text, '1С: выручка 100 Прибыль 20');
++  assert.equal(report.options.speech_message_id, 'one');
++  assert.equal(report.options.speech_chat_id, 'chat-one');
++  assert.equal(voice.finish('two', 'chat-two'), null);
++  assert.equal(voice.finish('one', 'chat-one'), null);
++  assert.equal(voice.emoji('спасибо'), '😊');
++});
+diff --git a/.avx1/test_desktop_ui.cjs b/.avx1/test_desktop_ui.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7016ac0c83143384a6d6faebeebbb07f46c3a12
+--- /dev/null
++++ b/.avx1/test_desktop_ui.cjs
+@@ -0,0 +1,83 @@
++const assert = require('node:assert/strict')
++const fs = require('node:fs')
++const path = require('node:path')
++const { _electron, chromium } = require(process.env.TEST_PLAYWRIGHT)
++const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses')
++const { smokeHardened } = require('./packaged-launch.cjs')
++const { createHash } = require('node:crypto')
++;(async () => {
++  const executablePath = process.argv[2]
++  const profile = process.argv[3]
++  fs.mkdirSync(profile, { recursive: true })
++  await smokeHardened(executablePath, profile + '-production', chromium, process.env.EXPECTED_DESKTOP_VERSION)
++  // Main-process inspection needs its fuse; instrument only an unshipped sibling EXE.
++  // The first smoke above runs the exact installed production EXE with all fuses intact.
++  const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex')
++  const before = digest(executablePath)
++  const inspectionExecutable = path.join(path.dirname(executablePath), 'open-webui-inspection-fixture.exe')
++  fs.copyFileSync(executablePath, inspectionExecutable, fs.constants.COPYFILE_EXCL)
++  let app
++  let guestServer
++  try {
++    await flipFuses(inspectionExecutable, { version: FuseVersion.V1, [FuseV1Options.EnableNodeCliInspectArguments]: true })
++    app = await _electron.launch({ executablePath: inspectionExecutable, args: ['--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`], env: { ...process.env, APPDATA: profile, LOCALAPPDATA: profile }, timeout: 60000 })
++    await app.firstWindow()
++    let page = app.windows()[0]
++    for (const candidate of app.windows()) {
++      if (await (await app.browserWindow(candidate)).evaluate(window => window.isVisible())) { page = candidate; break }
++    }
++    const errors = []
++    page.on('pageerror', error => errors.push(error.message))
++    try {
++      await page.getByText('Новое подключение', { exact: true }).or(page.getByRole('button', { name: 'Начать', exact: true })).first().waitFor({ state: 'visible', timeout: 60000 })
++      assert.equal(await page.locator('html').getAttribute('lang'), 'ru-RU')
++    } catch (error) {
++      await page.screenshot({ path: path.join(profile, 'russian-failure.png') })
++      const state = await Promise.all(app.windows().map(async item => ({ url: item.url(), body: await item.locator('body').innerText().catch(() => '') })))
++      fs.writeFileSync(path.join(profile, 'renderer-state.json'), JSON.stringify(state, null, 2))
++      console.error('CI-only window state:', JSON.stringify(state))
++      throw error
++    }
++    await page.screenshot({ path: path.join(profile, 'russian-onboarding.png') })
++    assert.deepEqual(errors, [])
++    assert.equal(await app.evaluate(({ app }) => app.getVersion()), process.env.EXPECTED_DESKTOP_VERSION)
++    guestServer = require('node:http').createServer((_request, response) => response.end('<!doctype html><title>Untrusted fixture</title>'))
++    await new Promise(resolve => guestServer.listen(0, '127.0.0.1', resolve))
++    const guestId = await page.evaluate(async port => {
++      const guest = document.createElement('webview')
++      guest.id = 'security-guest-fixture'
++      guest.setAttribute('nodeintegration', '')
++      guest.setAttribute('preload', 'file:///untrusted/preload/content-preload.js')
++      guest.setAttribute('src', `http://127.0.0.1:${port}/`)
++      guest.style.cssText = 'width:100px;height:100px'
++      return await new Promise((resolve, reject) => {
++        const timer = setTimeout(() => reject(Error('Guest fixture did not load')), 15000)
++        guest.addEventListener('dom-ready', () => { clearTimeout(timer); resolve(guest.getWebContentsId()) }, { once: true })
++        document.body.appendChild(guest)
++      })
++    }, guestServer.address().port)
++    const preferences = await app.evaluate(({ webContents }, id) => {
++      const value = webContents.fromId(id).getLastWebPreferences()
++      return { node: value.nodeIntegration, sandbox: value.sandbox, isolated: value.contextIsolation, preload: value.preload }
++    }, guestId)
++    assert.equal(preferences.node, false)
++    assert.equal(preferences.sandbox, true)
++    assert.equal(preferences.isolated, true)
++    assert.ok(!String(preferences.preload ?? '').includes('untrusted'))
++    const guestSurface = await page.evaluate(async () => {
++      const guest = document.getElementById('security-guest-fixture')
++      return await guest.executeJavaScript('({relay:typeof window.electronAPI?.send,node:typeof require,keys:Object.keys(window.electronAPI ?? {}).sort()})')
++    })
++    assert.equal(guestSurface.relay, 'function')
++    assert.equal(guestSurface.node, 'undefined')
++    assert.deepEqual(guestSurface.keys, ['onEvent','send'])
++    await page.evaluate(() => document.getElementById('security-guest-fixture').remove())
++    console.log('PACKAGED_GUEST_TRUST_BOUNDARY_VERIFIED')
++    console.log('NSIS_RUSSIAN_ONBOARDING_RENDERED_NO_PAGE_ERRORS')
++  } finally {
++    if (app) await app.close()
++    if (guestServer) await new Promise(resolve => guestServer.close(resolve))
++    fs.unlinkSync(inspectionExecutable)
++    assert.equal(digest(executablePath), before, 'Production EXE must remain unmodified')
++  }
++})().catch(error => { console.error(error); process.exitCode = 1 })
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 716a7f6f853893613a743ed924807023a99e8630..e901489e0e9d60c01f665721c4a1ec24dd366f0a 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -1,8 +1,14 @@
+ // @ts-nocheck
++import { VoiceInputSessions, isOwnedVoiceGuest, readOwnedVoiceToken, type VoiceTarget } from './voice-input-session'
++import { secureGuestWebPreferences, isConfiguredConnectionURL, isConfiguredCertificateHost } from './guest-webview'
+ 
+ import {
+   app,
++  net,
+   shell,
++  session,
++  webContents,
++  systemPreferences,
+   clipboard,
+   nativeImage,
+   nativeTheme,
+@@ -16,6 +22,7 @@ import {
+   dialog
+ } from 'electron'
+ import path, { join } from 'path'
++import { pathToFileURL } from 'node:url'
+ import { readFile, statfs } from 'fs/promises'
+ 
+ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+@@ -38,6 +45,8 @@ import {
+   startServer,
+   webuiService,
+   uninstallPython,
++  validateRemoteUrl,
++  type Connection,
+   type AppConfig
+ } from './utils'
+ 
+@@ -63,6 +72,7 @@ import {
+   getRepoFiles
+ } from './utils/huggingface'
+ 
++import { startOpenTerminal, stopOpenTerminal, getOpenTerminalInfo, terminalService, updateOpenTerminal } from './utils/open-terminal'
+ import { setupOllama, startOllama, stopOllama, shutdownOllama, ollamaService, getOllamaInfo, checkOllamaUpdate, updateOllama, uninstallOllama } from './utils/ollama'
+ 
+ import { attachTerminal } from './process/terminalChannel'
+@@ -70,6 +80,7 @@ import { attachTerminal } from './process/terminalChannel'
+ import { initUpdater, checkForUpdates, downloadUpdate, installUpdate, getUpdateState, setAutomaticUpdates } from './updater'
+ 
+ import log from 'electron-log'
++import { nativeText, setNativeLanguage } from './native-i18n'
+ log.transports.file.resolvePathFn = () => getLogFilePath('main')
+ 
+ import icon from '../../resources/icon.png?asset'
+@@ -123,11 +134,49 @@ app.disableDomainBlockingFor3DAPIs()
+ // ─── State ──────────────────────────────────────────────
+ 
+ let mainWindow: BrowserWindow | null = null
++let spotlightWindow: BrowserWindow | null = null
++let voiceInputWindow: BrowserWindow | null = null
++let voiceInputRecording = false
+ let tray: Tray | null = null
+ let isQuiting = false
+ 
+ let CONFIG: AppConfig | null = null
+ 
++const voiceGuests = new Map<string, number>()
++const nativeVoiceURL = () => is.dev && process.env['ELECTRON_RENDERER_URL']
++  ? `${process.env['ELECTRON_RENDERER_URL']}/voice-input.html`
++  : pathToFileURL(join(__dirname, '../renderer/voice-input.html')).href
++
++async function currentVoiceTarget(): Promise<VoiceTarget> {
++  const connection = await getDefaultConnection()
++  const guestId = connection && voiceGuests.get(connection.id)
++  if (!connection || guestId === undefined) {
++    throw new Error('Open the selected connection and sign in before using voice input.')
++  }
++  return { connectionId: connection.id, url: resolveConnectionUrl(connection).replace(/\/+$/, ''), guestId }
++}
++
++const voiceSessions = new VoiceInputSessions(async (target) => {
++  const current = await currentVoiceTarget()
++  if (current.connectionId !== target.connectionId || current.url !== target.url || current.guestId !== target.guestId) {
++    throw new Error('Voice input connection changed')
++  }
++  const token = await readOwnedVoiceToken(webContents.fromId(target.guestId) ?? undefined, target,
++    mainWindow?.webContents, session.fromPartition(`persist:connection-${target.connectionId}`))
++  const after = await currentVoiceTarget()
++  if (after.connectionId !== target.connectionId || after.url !== target.url || after.guestId !== target.guestId) {
++    throw new Error('Voice input connection changed')
++  }
++  return token
++})
++
++function requireVoiceCaller(event): void {
++  if (!voiceInputWindow || event.sender !== voiceInputWindow.webContents ||
++      event.senderFrame !== event.sender.mainFrame || event.sender.getURL() !== nativeVoiceURL()) {
++    throw new Error('Invalid voice input caller')
++  }
++}
++
+ // ─── Global Shortcuts ───────────────────────────────────
+ 
+ /**
+@@ -149,8 +198,8 @@ function tryRegisterShortcut(
+     log.warn(`${label} shortcut "${accel}" could not be registered (returned false)`)
+     if (!silent) {
+       new Notification({
+-        title: label,
+-        body: `Could not register shortcut "${accel}". It may be in use by another application.`
++        title: nativeText(label),
++        body: `${nativeText('Could not register shortcut')} \"${accel}\". ${nativeText('It may be in use by another application.')}`
+       }).show()
+     }
+     return false
+@@ -158,8 +207,8 @@ function tryRegisterShortcut(
+     log.warn(`${label} shortcut "${accel}" registration threw:`, error)
+     if (!silent) {
+       new Notification({
+-        title: label,
+-        body: `Failed to register shortcut "${accel}". It may conflict with another application.`
++        title: nativeText(label),
++        body: `${nativeText('Failed to register shortcut')} \"${accel}\". ${nativeText('It may conflict with another application.')}`
+       }).show()
+     }
+     return false
+@@ -176,13 +225,330 @@ const showMainWindow = (): void => {
+   mainWindow.focus()
+ }
+ 
+-const registerShortcuts = (globalAccel?: string): void => {
++const registerShortcuts = (globalAccel?: string, spotlightAccel?: string, voiceInputAccel?: string, callAccel?: string): void => {
+   globalShortcut.unregisterAll()
+ 
+   // Global shortcut – bring main window to foreground
+   if (globalAccel) {
+     tryRegisterShortcut(globalAccel, 'Open WebUI', showMainWindow)
+   }
++
++  // Spotlight shortcut – toggle the spotlight input bar
++  if (spotlightAccel) {
++    tryRegisterShortcut(spotlightAccel, 'Spotlight', () => {
++      const text = CONFIG?.spotlightClipboardPaste !== false
++        ? (clipboard.readText()?.trim() || '')
++        : ''
++      toggleSpotlight(text)
++    })
++  }
++
++  // Voice input shortcut – toggle microphone recording
++  if (voiceInputAccel && CONFIG?.voiceInputEnabled !== false) {
++    tryRegisterShortcut(voiceInputAccel, 'Voice Input', () => {
++      toggleVoiceInput()
++    })
++  } else {
++    log.info(`Voice input shortcut skipped — accel="${voiceInputAccel}", enabled=${CONFIG?.voiceInputEnabled}`)
++  }
++
++  // Call shortcut – open the voice/video call overlay
++  if (callAccel && CONFIG?.callEnabled !== false) {
++    tryRegisterShortcut(callAccel, 'Call', () => {
++      toggleCall()
++    })
++  } else {
++    log.info(`Call shortcut skipped — accel="${callAccel}", enabled=${CONFIG?.callEnabled}`)
++  }
++}
++
++// ─── Spotlight Window ───────────────────────────────────
++// Bar position within the fullscreen window (persisted to config).
++let spotlightBarOffset: { x: number; y: number } | null = null
++
++function loadSpotlightPosition(): void {
++  if (CONFIG?.spotlightPosition) {
++    spotlightBarOffset = { ...CONFIG.spotlightPosition }
++  }
++}
++
++function createSpotlightWindow(): BrowserWindow {
++  const { screen } = require('electron')
++  const cursorPoint = screen.getCursorScreenPoint()
++  const activeDisplay = screen.getDisplayNearestPoint(cursorPoint)
++  const { x: sx, y: sy, width: sw, height: sh } = activeDisplay.bounds
++
++  spotlightWindow = new BrowserWindow({
++    x: sx,
++    y: sy,
++    width: sw,
++    height: sh,
++    frame: false,
++    transparent: true,
++    alwaysOnTop: true,
++    skipTaskbar: true,
++    resizable: false,
++    hasShadow: false,
++    show: false,
++    focusable: true,
++    // Ensure the window appears on whichever Space/desktop the user is
++    // currently on, rather than pulling them back to the primary Space.
++    visibleOnAllWorkspaces: true,
++    icon: path.join(__dirname, 'assets/icon.png'),
++    webPreferences: {
++      preload: join(__dirname, '../preload/spotlight-preload.js'),
++      sandbox: false,
++      webviewTag: false
++    }
++  })
++
++  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
++    spotlightWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/spotlight.html`)
++  } else {
++    spotlightWindow.loadFile(join(__dirname, '../renderer/spotlight.html'))
++  }
++
++  // Hide on blur — but only when the window was truly visible and settled.
++  let blurArmed = false
++  spotlightWindow.on('focus', () => {
++    blurArmed = false
++    setTimeout(() => {
++      blurArmed = true
++    }, 200)
++  })
++  spotlightWindow.on('blur', () => {
++    if (blurArmed) {
++      spotlightWindow?.hide()
++    }
++  })
++
++  spotlightWindow.on('closed', () => {
++    spotlightWindow = null
++  })
++
++  return spotlightWindow
++}
++
++function showAndFocusSpotlight(win: BrowserWindow, initialQuery?: string): void {
++  // On macOS, avoid `app.focus({ steal: true })` — it activates the whole
++  // application and causes the window manager to switch back to whichever
++  // Space the app was originally launched on (#179).  Instead, ensure the
++  // window is visible on all workspaces and focus it directly.
++  if (process.platform === 'darwin') {
++    win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true })
++  }
++
++  // Reposition fullscreen window to the active display
++  const { screen } = require('electron')
++  const cursorPoint = screen.getCursorScreenPoint()
++  const activeDisplay = screen.getDisplayNearestPoint(cursorPoint)
++  const { x: sx, y: sy, width: sw, height: sh } = activeDisplay.bounds
++  win.setBounds({ x: sx, y: sy, width: sw, height: sh })
++
++  // Hide main window so it doesn't appear behind the transparent overlay
++  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
++    mainWindow.hide()
++  }
++
++  win.show()
++  win.focus()
++  win.webContents.focus()
++
++  // Send initial data to the renderer (bar offset + optional query)
++  win.webContents.send('spotlight:init', {
++    barOffset: spotlightBarOffset,
++    screenSize: { width: sw, height: sh },
++    query: initialQuery || ''
++  })
++}
++
++function toggleSpotlight(selectedText?: string): void {
++  if (spotlightWindow && !spotlightWindow.isDestroyed()) {
++    if (spotlightWindow.isVisible()) {
++      spotlightWindow.hide()
++    } else {
++      showAndFocusSpotlight(spotlightWindow, selectedText)
++    }
++  } else {
++    const win = createSpotlightWindow()
++    win.once('ready-to-show', () => {
++      showAndFocusSpotlight(win, selectedText)
++    })
++  }
++}
++
++// ─── Voice Input Window ─────────────────────────────────
++
++function createVoiceInputWindow(): BrowserWindow {
++  const { screen } = require('electron')
++  const cursorPoint = screen.getCursorScreenPoint()
++  const activeDisplay = screen.getDisplayNearestPoint(cursorPoint)
++  const { x: sx, y: sy, width: sw } = activeDisplay.bounds
++
++  const winW = 340
++  const winH = 72
++
++  voiceInputWindow = new BrowserWindow({
++    x: sx + Math.round((sw - winW) / 2),
++    y: sy + 120,
++    width: winW,
++    height: winH,
++    frame: false,
++    transparent: true,
++    alwaysOnTop: true,
++    skipTaskbar: true,
++    resizable: false,
++    hasShadow: false,
++    show: false,
++    focusable: true,
++    icon: path.join(__dirname, 'assets/icon.png'),
++    webPreferences: {
++      preload: join(__dirname, '../preload/voice-input-preload.js'),
++      partition: 'voice-input',
++      sandbox: false,
++      webviewTag: false,
++      autoplayPolicy: 'no-user-gesture-required'
++    }
++  })
++
++  // Keep voice permission isolated from saved WebUI browser sessions.
++  const voiceInputURL = nativeVoiceURL()
++  voiceInputWindow.webContents.session.setPermissionRequestHandler(
++    (webContents, permission, callback, details) => {
++      callback(webContents === voiceInputWindow?.webContents && permission === 'media' &&
++        details.isMainFrame && details.requestingUrl === voiceInputURL &&
++        'mediaTypes' in details && Array.isArray(details.mediaTypes) &&
++        details.mediaTypes.length > 0 && details.mediaTypes.every(type => type === 'audio'))
++    }
++  )
++
++  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
++    voiceInputWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/voice-input.html`)
++  } else {
++    voiceInputWindow.loadFile(join(__dirname, '../renderer/voice-input.html'))
++  }
++
++  voiceInputWindow.on('closed', () => {
++    voiceInputWindow = null
++    voiceInputRecording = false
++  })
++
++  return voiceInputWindow
++}
++
++function playChime(ascending: boolean): Promise<void> {
++  return new Promise((resolve) => {
++    const { execFile } = require('child_process')
++    const fs = require('fs')
++    const file = ascending ? 'chime-start.wav' : 'chime-stop.wav'
++    const soundPath = app.isPackaged
++      ? join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'sounds', file)
++      : join(app.getAppPath(), 'resources', 'sounds', file)
++
++    const exists = fs.existsSync(soundPath)
++    log.info(`playChime: ${ascending ? 'start' : 'stop'}, path=${soundPath}, exists=${exists}`)
++
++    if (!exists) { resolve(); return }
++
++    if (process.platform === 'darwin') {
++      execFile('afplay', [soundPath], (err, stdout, stderr) => {
++        if (err) log.warn('afplay error:', err.message, stderr)
++        resolve()
++      })
++    } else if (process.platform === 'win32') {
++      execFile('powershell', ['-NoProfile', '-Command',
++        `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`
++      ], () => resolve())
++    } else {
++      execFile('paplay', [soundPath], (err) => {
++        if (err) execFile('aplay', [soundPath], () => resolve())
++        else resolve()
++      })
++    }
++  })
++}
++
++async function toggleVoiceInput(): Promise<void> {
++  if (voiceInputRecording) {
++    // Stop recording — chime plays in done/close handler after mic is released
++    voiceInputRecording = false
++    if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
++      voiceInputWindow.webContents.send('voiceInput:state', { recording: false, sessionId: voiceSessions.id })
++    }
++    return
++  }
++
++  // Pre-flight: check microphone permission on macOS
++  if (process.platform === 'darwin') {
++    const micStatus = systemPreferences.getMediaAccessStatus('microphone')
++    if (micStatus !== 'granted') {
++      const granted = await systemPreferences.askForMediaAccess('microphone')
++      if (!granted) {
++        log.warn('Voice input: microphone permission denied')
++        new Notification({
++          title: nativeText('Voice Input'),
++          body: nativeText('Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone, then restart the app.')
++        }).show()
++        return
++      }
++    }
++  }
++
++  let sessionId: number
++  try {
++    sessionId = await voiceSessions.begin(await currentVoiceTarget())
++  } catch (error) {
++    log.warn('Voice input preflight failed:', error instanceof Error ? error.message : 'unavailable')
++    new Notification({ title: nativeText('Voice Input'), body: nativeText(error instanceof Error ? error.message : 'Voice input unavailable') }).show()
++    return
++  }
++
++  // Start recording — chime plays concurrently (separate audio output path from mic input)
++  voiceInputRecording = true
++  playChime(true)
++
++  if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
++    voiceInputWindow.show()
++    voiceInputWindow.focus()
++    voiceInputWindow.webContents.send('voiceInput:state', { recording: true, sessionId })
++  } else {
++    const win = createVoiceInputWindow()
++    win.once('ready-to-show', () => {
++      if (voiceSessions.id !== sessionId) return
++      win.show()
++      win.focus()
++      setTimeout(() => {
++        if (voiceSessions.id === sessionId && !win.isDestroyed()) win.webContents.send('voiceInput:state', { recording: true, sessionId })
++      }, 100)
++    })
++  }
++}
++
++// ─── Call Shortcut ──────────────────────────────────────
++
++async function toggleCall(): Promise<void> {
++  // Pre-flight: check a connection is configured
++  try {
++    const conn = await getDefaultConnection()
++    if (!conn) {
++      log.warn('Call: no connection configured')
++      new Notification({
++        title: nativeText('Call'),
++        body: nativeText('No connection configured. Set up a connection in Settings before using the call shortcut.')
++      }).show()
++      return
++    }
++
++    const url = resolveConnectionUrl(conn)
++    sendToRenderer('call', { connectionId: conn.id, url })
++
++    if (mainWindow && !mainWindow.isDestroyed()) {
++      mainWindow.show()
++      mainWindow.focus()
++    }
++  } catch (err: any) {
++    log.warn('Call: config check failed:', err)
++  }
+ }
+ 
+ // ─── Windows ────────────────────────────────────────────
+@@ -333,47 +699,72 @@ function createMainWindow(show = true): void {
+ // ─── Tray ───────────────────────────────────────────────
+ 
+ const updateTray = () => {
++  setNativeLanguage(CONFIG?.language)
+   if (!CONFIG) return
+   if (process.platform === 'darwin' && CONFIG.showMenuBarIcon === false) {
+-    tray?.destroy()
+-    tray = null
+-    return
++    tray?.destroy(); tray = null; return
+   }
+   if (!tray) {
+-    const trayIcon = nativeImage.createFromPath(icon)
+-    tray = new Tray(trayIcon.resize({ width: 16, height: 16 }))
++    tray = new Tray(nativeImage.createFromPath(icon).resize({ width: 16, height: 16 }))
+     tray.setToolTip('Open WebUI Desktop')
+     if (process.platform === 'linux') tray.on('click', showMainWindow)
+   }
+ 
+-  const canOpenInBrowser = webuiService.info.reachable && !!webuiService.info.url
++  // Remote connections from config
++  const remoteItems = (CONFIG.connections || []).map((conn) => ({
++    label: `${conn.id === CONFIG.defaultConnectionId ? '★ ' : ''}${conn.name}`,
++    sublabel: conn.url,
++    click: async () => {
++      const result = await connectTo(conn)
++      if (result) sendToRenderer('connection:open', result)
++    }
++  }))
++
++  // Virtual local connection (when package is installed)
++  const localItem = isPackageInstalled('open-webui')
++    ? [{
++        label: `${CONFIG.defaultConnectionId === 'local' ? '★ ' : ''}${nativeText('Open WebUI (Local)')}`,
++        sublabel: webuiService.info.url || `http://127.0.0.1:${CONFIG.localServer?.port ?? 8080}`,
++        click: async () => {
++          const result = await connectTo(buildLocalConnection())
++          if (result) sendToRenderer('connection:open', result)
++        }
++      }]
++    : []
++
++  const allItems = [...localItem, ...remoteItems]
+ 
+   const trayMenuTemplate = [
+     {
+-      label: 'Open WebUI',
+-      click: async () => {
+-        showMainWindow()
+-        const result = await openLocalWebUI()
+-        if (result) sendToRenderer('server:open', result)
+-      }
+-    },
+-    {
+-      label: 'Open in Browser',
+-      enabled: canOpenInBrowser,
++      label: nativeText('Show Open WebUI'),
+       click: () => {
+-        if (webuiService.info.reachable && webuiService.info.url) openUrl(webuiService.info.url)
+-      }
+-    },
+-    {
+-      label: 'Copy Address',
+-      enabled: canOpenInBrowser,
+-      click: () => {
+-        if (webuiService.info.reachable && webuiService.info.url) clipboard.writeText(webuiService.info.url)
++        mainWindow?.show()
++        mainWindow?.focus()
+       }
+     },
++    { label: nativeText('Open in Browser'), enabled: webuiService.info.reachable,
++      click: () => { if (webuiService.info.url) openUrl(webuiService.info.url) } },
+     { type: 'separator' },
++    ...(allItems.length > 0
++      ? [
++          { label: nativeText('Connections'), enabled: false },
++          ...allItems,
++          { type: 'separator' }
++        ]
++      : []),
++    ...(webuiService.info.status === 'started' && webuiService.info.url
++      ? [
++          {
++            label: `${nativeText('Local')}: ${webuiService.info.url}`,
++            click: () => {
++              if (webuiService.info.url) clipboard.writeText(webuiService.info.url)
++            }
++          },
++          { type: 'separator' }
++        ]
++      : []),
+     {
+-      label: 'Quit Open WebUI Desktop',
++      label: nativeText('Quit Open WebUI'),
+       accelerator: 'CommandOrControl+Q',
+       click: () => {
+         isQuiting = true
+@@ -386,7 +777,58 @@ const updateTray = () => {
+   tray?.setContextMenu(trayMenu)
+ }
+ 
+-// Launch only the managed local installation; legacy saved server URLs are never used.
++const buildLocalConnection = (): Connection => {
++  const port = CONFIG?.localServer?.port ?? 8080
++  return {
++    id: 'local',
++    name: 'Open WebUI',
++    type: 'local',
++    url: webuiService.info.url || `http://127.0.0.1:${port}`
++  }
++}
++
++// Resolve the default connection.  'local' is a virtual ID that
++// synthesises a Connection on the fly; everything else is looked
++// up in the persisted connections array (remote only).
++const getDefaultConnection = async (): Promise<Connection | null> => {
++  const config = await getConfig()
++  if (!config.defaultConnectionId) return null
++  if (config.defaultConnectionId === 'local') return buildLocalConnection()
++  return config.connections.find((c) => c.id === config.defaultConnectionId) ?? null
++}
++
++// Resolve the URL for a connection, preferring the live webuiService.info.url
++// for local connections and normalising 0.0.0.0 to localhost.
++const resolveConnectionUrl = (conn: Connection): string => {
++  let url = conn.url
++  if (conn.type === 'local' && webuiService.info.url) url = webuiService.info.url
++  if (url.startsWith('http://0.0.0.0')) url = url.replace('http://0.0.0.0', 'http://localhost')
++  return url
++}
++
++const connectTo = async (connection: Connection) => {
++  let url = connection.url
++
++  if (connection.type === 'local') {
++    // Start local server if needed
++    if (webuiService.info.status !== 'started') {
++      const started = await startServerHandler()
++      if (!started) return null
++    }
++    url = webuiService.info.url || connection.url
++
++
++  }
++
++  // Normalize URL
++  if (url.startsWith('http://0.0.0.0')) {
++    url = url.replace('http://0.0.0.0', 'http://localhost')
++  }
++
++  return { url, connectionId: connection.id }
++}
++
++// Open the configured local backend after readiness succeeds.
+ const openLocalWebUI = async () => {
+   if (!isPackageInstalled('open-webui')) return null
+   if (!await startServerHandler()) return null
+@@ -421,6 +863,21 @@ llamaService.subscribe((event) => {
+   if (info.reachable) sendToRenderer('llamacpp:ready', info)
+ })
+ 
++let registeredTerminalUrl: string | null = null
++terminalService.subscribe(event => {
++  if (event.type !== 'state' || isQuiting) return
++  const info = getOpenTerminalInfo()
++  sendToRenderer('open-terminal:info', info)
++  sendToRenderer('status:open-terminal', info.status)
++  const nextUrl = info.reachable ? info.url : null
++  if (registeredTerminalUrl !== nextUrl) {
++    if (registeredTerminalUrl) sendToRenderer('connections:terminal', { action: 'remove', url: registeredTerminalUrl })
++    if (nextUrl && info.apiKey) sendToRenderer('connections:terminal', { action: 'add', url: nextUrl, key: info.apiKey })
++    registeredTerminalUrl = nextUrl
++  }
++  if (info.reachable) sendToRenderer('open-terminal:ready', info)
++})
++
+ let registeredOllamaUrl: string | null = null
+ ollamaService.subscribe((event) => {
+   if (event.type !== 'state') return
+@@ -486,16 +943,18 @@ const resetAppHandler = async () => {
+     await resetApp()
+     CONFIG = await getConfig() // reload from defaults since config.json was deleted
+     setAutomaticUpdates(CONFIG.automaticUpdates)
+-    new Notification({ title: 'Open WebUI', body: 'Application has been reset.' }).show()
++    new Notification({ title: nativeText('Open WebUI'), body: nativeText('Application has been reset.') }).show()
+   } catch (error) {
+     log.error('Failed to reset:', error)
+-    new Notification({ title: 'Open WebUI', body: `Reset failed: ${error.message}` }).show()
++    new Notification({ title: nativeText('Open WebUI'), body: nativeText(`Reset failed: ${error.message}`) }).show()
+   }
+ }
+ 
+ // ─── Helpers ────────────────────────────────────────────
+ 
+ const sendToRenderer = (type: string, data?: any) => {
++  if (type === 'status:install' && typeof data === 'string') data = nativeText(data)
++  if (type === 'error' && data?.message) data = { ...data, message: nativeText(data.message) }
+   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+     mainWindow.webContents.send('main:data', { type, data })
+   }
+@@ -526,7 +985,8 @@ if (!gotTheLock) {
+ 
+   app.whenReady().then(async () => {
+     CONFIG = await getConfig()
+-    log.info('Config:', CONFIG)
++    loadSpotlightPosition()
++    log.info('Config loaded')
+ 
+     app.name = 'Open WebUI'
+     if (process.platform === 'darwin' && app.dock) {
+@@ -571,24 +1031,49 @@ if (!gotTheLock) {
+       log.info('Running with GPU sandbox disabled (marker file present)')
+     }
+ 
++    // TLS exceptions are confined to saved user connections and loopback.
++    const connectionURLs = () => (CONFIG?.connections ?? []).map((connection) => connection.url).filter((url) => typeof url === 'string')
++    app.on('certificate-error', (event, _webContents, url, _error, _certificate, callback) => {
++      event.preventDefault()
++      callback(isConfiguredConnectionURL(url, connectionURLs()))
++    })
++    const certificatePolicy = (request, callback) => {
++      callback(isConfiguredCertificateHost(request.hostname, connectionURLs()) ? 0 : -3)
++    }
++    session.defaultSession.setCertificateVerifyProc(certificatePolicy)
+     app.on('session-created', (newSession) => {
++      newSession.setCertificateVerifyProc(certificatePolicy)
++
+       // Grant media / notification permissions for webview partition sessions
+       // so that auth flows, media capture, and notifications work correctly.
+-      newSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
++      newSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
++        if (!isConfiguredConnectionURL(details.requestingUrl, connectionURLs()) ||
++            !isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs())) {
++          callback(false)
++          return
++        }
+         if (permission === 'fileSystem') {
+-          // The native picker selects the files; only allow reading them.
+-          callback('fileAccessType' in details && details.fileAccessType === 'readable')
++          callback(isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs()) &&
++            'fileAccessType' in details && details.fileAccessType === 'readable')
+           return
+         }
+         const allowed = ['media', 'display-capture', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
+-        callback(allowed.includes(permission))
++        callback(allowed.includes(permission) && isConfiguredConnectionURL(webContents?.getURL() ?? '', connectionURLs()))
+       })
+ 
+       newSession.setDisplayMediaRequestHandler(
+         (request, callback) => {
++          const permitted = () => request.frame &&
++            isConfiguredConnectionURL(request.securityOrigin, connectionURLs()) &&
++            new URL(request.frame.url).origin === request.securityOrigin
++          try {
++            if (!permitted()) { callback({}); return }
++          } catch { callback({}); return }
+           desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+-            callback({ video: sources[0], audio: 'loopback' })
+-          })
++            try {
++              callback(permitted() && sources[0] ? { video: sources[0], audio: 'loopback' } : {})
++            } catch { callback({}) }
++          }, () => callback({}))
+         },
+         { useSystemPicker: true }
+       )
+@@ -613,18 +1098,7 @@ if (!gotTheLock) {
+     // 'crashed' listener in Content.svelte surfaces these to the user.
+     app.on('web-contents-created', (_event, contents) => {
+       contents.on('will-attach-webview', (event, preferences, params) => {
+-        if (!/^https?:\/\//i.test(params.src)) {
+-          event.preventDefault()
+-          return
+-        }
+-        preferences.preload = join(__dirname, '../preload/content-preload.js')
+-        preferences.nodeIntegration = false
+-        preferences.nodeIntegrationInWorker = false
+-        preferences.nodeIntegrationInSubFrames = false
+-        preferences.contextIsolation = true
+-        preferences.sandbox = true
+-        preferences.webSecurity = true
+-        preferences.allowRunningInsecureContent = false
++        if (!secureGuestWebPreferences(preferences, params.src, join(__dirname, '../preload/content-preload.js'))) event.preventDefault()
+       })
+       contents.on('render-process-gone', (_e, details) => {
+         if (details.reason !== 'clean-exit') {
+@@ -680,11 +1154,11 @@ if (!gotTheLock) {
+           // Link handling
+           if (params.linkURL) {
+             menuItems.push({
+-              label: 'Open Link in Browser',
++              label: nativeText('Open Link in Browser'),
+               click: () => openUrl(params.linkURL)
+             })
+             menuItems.push({
+-              label: 'Copy Link',
++              label: nativeText('Copy Link'),
+               click: () => clipboard.writeText(params.linkURL)
+             })
+             menuItems.push({ type: 'separator' })
+@@ -693,18 +1167,18 @@ if (!gotTheLock) {
+           // Editable field actions (input, textarea, contenteditable)
+           if (params.isEditable) {
+             menuItems.push(
+-              { label: 'Undo', role: 'undo', enabled: params.editFlags.canUndo },
+-              { label: 'Redo', role: 'redo', enabled: params.editFlags.canRedo },
++              { label: nativeText('Undo'), role: 'undo', enabled: params.editFlags.canUndo },
++              { label: nativeText('Redo'), role: 'redo', enabled: params.editFlags.canRedo },
+               { type: 'separator' },
+-              { label: 'Cut', role: 'cut', enabled: params.editFlags.canCut },
+-              { label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy },
+-              { label: 'Paste', role: 'paste', enabled: params.editFlags.canPaste },
+-              { label: 'Select All', role: 'selectAll', enabled: params.editFlags.canSelectAll }
++              { label: nativeText('Cut'), role: 'cut', enabled: params.editFlags.canCut },
++              { label: nativeText('Copy'), role: 'copy', enabled: params.editFlags.canCopy },
++              { label: nativeText('Paste'), role: 'paste', enabled: params.editFlags.canPaste },
++              { label: nativeText('Select All'), role: 'selectAll', enabled: params.editFlags.canSelectAll }
+             )
+           } else if (params.selectionText) {
+             // Non-editable text selection
+             menuItems.push(
+-              { label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy }
++              { label: nativeText('Copy'), role: 'copy', enabled: params.editFlags.canCopy }
+             )
+           }
+ 
+@@ -745,6 +1219,7 @@ if (!gotTheLock) {
+       gpuSandboxDisabled
+     }))
+ 
++    ipcMain.handle('window:isFocused', () => ({ isFocused: mainWindow?.isFocused() ?? false }))
+     ipcMain.handle('app:contentPreloadPath', () => {
+       return `file://${join(__dirname, '../preload/content-preload.js')}`
+     })
+@@ -782,7 +1257,7 @@ if (!gotTheLock) {
+       CONFIG = await getConfig()
+       updateTray()
+       setAutomaticUpdates(CONFIG.automaticUpdates)
+-      registerShortcuts(CONFIG.globalShortcut)
++      registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut)
+     })
+ 
+     // Python/uv
+@@ -845,13 +1320,83 @@ if (!gotTheLock) {
+ 
+     ipcMain.on('terminal:connect', (event, serviceId: string, connectionId: number) => {
+       if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return
+-      const service = serviceId === 'server' ? webuiService : serviceId === 'llamacpp' ? llamaService : serviceId === 'ollama' ? ollamaService : null
++      const service = serviceId === 'server' ? webuiService : serviceId === 'llamacpp' ? llamaService : serviceId === 'open-terminal' ? terminalService : serviceId === 'ollama' ? ollamaService : null
+       if (!service || !Number.isSafeInteger(connectionId)) return
+       attachTerminal(service, event.sender, connectionId)
+     })
+ 
+     ipcMain.handle('server:open', () => openLocalWebUI())
+ 
++    // Connections (remote only — local is virtual)
++    ipcMain.handle('connections:list', async () => {
++      const config = await getConfig()
++      return config.connections
++    })
++
++    ipcMain.handle('connections:add', async (_event, connection: Connection) => {
++      const config = await getConfig()
++      config.connections.push(connection)
++      if (!config.defaultConnectionId) {
++        config.defaultConnectionId = connection.id
++      }
++      await setConfig(config)
++      CONFIG = config
++      updateTray()
++      sendToRenderer('connections:changed', config.connections)
++      return config.connections
++    })
++
++    ipcMain.handle('connections:remove', async (_event, id: string) => {
++      const config = await getConfig()
++      config.connections = config.connections.filter((c) => c.id !== id)
++      if (config.defaultConnectionId === id) {
++        config.defaultConnectionId = config.connections[0]?.id || 'local'
++      }
++      await setConfig(config)
++      CONFIG = config
++      updateTray()
++      sendToRenderer('connections:changed', config.connections)
++      return config.connections
++    })
++
++    ipcMain.handle('connections:update', async (_event, id: string, updates: Partial<Connection>) => {
++      const config = await getConfig()
++      const idx = config.connections.findIndex((c) => c.id === id)
++      if (idx !== -1) {
++        config.connections[idx] = { ...config.connections[idx], ...updates }
++        await setConfig(config)
++        CONFIG = config
++        updateTray()
++        sendToRenderer('connections:changed', config.connections)
++      }
++      return config.connections
++    })
++
++    ipcMain.handle('connections:setDefault', async (_event, id: string) => {
++      const config = await getConfig()
++      config.defaultConnectionId = id
++      await setConfig(config)
++      CONFIG = config
++      updateTray()
++    })
++
++    ipcMain.handle('connections:connect', async (_event, id: string) => {
++      // 'local' is a virtual connection — synthesize it
++      if (id === 'local') {
++        return await connectTo(buildLocalConnection())
++      }
++      const config = await getConfig()
++      const conn = config.connections.find((c) => c.id === id)
++      if (conn) {
++        return await connectTo(conn)
++      }
++      return null
++    })
++
++    ipcMain.handle('validate:url', async (_event, url: string) => {
++      return await validateRemoteUrl(url)
++    })
++
+     // Updater
+     ipcMain.handle('updater:state', () => getUpdateState())
+     ipcMain.handle('updater:check', () => checkForUpdates())
+@@ -870,9 +1415,283 @@ if (!gotTheLock) {
+       }
+     })
+ 
++    // Guest registration comes only from the trusted desktop frame. It stores
++    // identity, never a token; the selected owned guest supplies current auth.
++    ipcMain.handle('connection:guest', async (event, connectionId: string, guestId: number) => {
++      if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame ||
++          typeof connectionId !== 'string' || !Number.isSafeInteger(guestId)) throw new Error('Invalid guest registration')
++      const config = await getConfig()
++      const connection = connectionId === 'local' ? buildLocalConnection()
++        : config.connections.find(item => item.id === connectionId)
++      if (!connection) throw new Error('Unknown connection')
++      const target = { connectionId, guestId, url: resolveConnectionUrl(connection) }
++      if (!isOwnedVoiceGuest(webContents.fromId(guestId) ?? undefined, target, mainWindow?.webContents,
++          session.fromPartition(`persist:connection-${connectionId}`))) throw new Error('Invalid connection guest')
++      voiceGuests.set(connectionId, guestId)
++    })
++    ipcMain.handle('connection:guest:remove', (event, connectionId: string, guestId: number) => {
++      if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return
++      if (voiceGuests.get(connectionId) === guestId) voiceGuests.delete(connectionId)
++    })
++
+     // Misc
+     ipcMain.handle('app:reset', () => resetAppHandler())
+ 
++    // Spotlight
++    ipcMain.handle('spotlight:submit', async (_event, query: string, images?: string[]) => {
++      const conn = await getDefaultConnection()
++      if (!conn) {
++        mainWindow?.show()
++        mainWindow?.focus()
++        return
++      }
++
++      const url = resolveConnectionUrl(conn)
++
++      // Build files payload from screenshot images
++      const files = images?.map((dataUrl, i) => ({
++        name: `screenshot-${Date.now()}-${i + 1}.png`,
++        mimeType: 'image/png',
++        dataUrl
++      }))
++
++      sendToRenderer('query', { query, connectionId: conn.id, url, files })
++
++      spotlightWindow?.hide()
++      // Show main window so it can receive and display the submitted query
++      if (mainWindow && !mainWindow.isDestroyed()) {
++        mainWindow.show()
++        mainWindow.focus()
++      }
++    })
++    ipcMain.handle('spotlight:close', () => {
++      spotlightWindow?.hide()
++    })
++
++    // Persist bar offset within the fullscreen spotlight window
++    ipcMain.handle('spotlight:savePosition', async (_event, offset: { x: number; y: number }) => {
++      spotlightBarOffset = offset
++      setConfig({ spotlightPosition: offset }).catch((err) =>
++        log.warn('Failed to persist spotlight bar position:', err)
++      )
++    })
++
++    // Capture a region of the screen (called from Spotlight renderer after drag)
++    ipcMain.handle(
++      'spotlight:captureRegion',
++      async (_event, rect: { x: number; y: number; width: number; height: number }) => {
++        try {
++          // ── Permission check (macOS) ──
++          if (process.platform === 'darwin') {
++            const status = systemPreferences.getMediaAccessStatus('screen')
++            if (status !== 'granted') {
++              log.warn(`spotlight:captureRegion — screen recording permission: ${status}`)
++              new Notification({
++                title: nativeText('Screen Recording Permission Required'),
++                body: nativeText('Open WebUI needs Screen Recording access to capture screenshots. Please enable it in System Settings → Privacy & Security → Screen Recording, then restart the app.')
++              }).show()
++              // Open the correct System Preferences pane
++              shell.openExternal(
++                'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
++              ).catch(() => {})
++              return 'no-permission'
++            }
++          }
++
++          // Make spotlight invisible (but don't hide it — hiding triggers macOS
++          // window activation which brings up the main window behind it)
++          spotlightWindow?.setOpacity(0)
++          // Small delay to let the window fully disappear before capture
++          await new Promise((r) => setTimeout(r, 150))
++
++          const { screen } = require('electron')
++          const cursorPoint = screen.getCursorScreenPoint()
++          const display = screen.getDisplayNearestPoint(cursorPoint)
++          const scaleFactor = display.scaleFactor || 1
++
++          const sources = await desktopCapturer.getSources({
++            types: ['screen'],
++            thumbnailSize: {
++              width: Math.round(display.bounds.width * scaleFactor),
++              height: Math.round(display.bounds.height * scaleFactor)
++            }
++          })
++
++          // Find the source matching this display
++          const source =
++            sources.find((s) => s.display_id === String(display.id)) || sources[0]
++          if (!source) {
++            spotlightWindow?.setOpacity(1)
++            return null
++          }
++
++          const fullImage = source.thumbnail
++          // Validate thumbnail is not empty (can happen without permission)
++          if (fullImage.isEmpty()) {
++            log.warn('spotlight:captureRegion — captured thumbnail is empty (likely no permission)')
++            spotlightWindow?.setOpacity(1)
++            return null
++          }
++
++          const cropped = fullImage.crop({
++            x: Math.round(rect.x * scaleFactor),
++            y: Math.round(rect.y * scaleFactor),
++            width: Math.round(rect.width * scaleFactor),
++            height: Math.round(rect.height * scaleFactor)
++          })
++
++          // Restore spotlight visibility
++          if (spotlightWindow && !spotlightWindow.isDestroyed()) {
++            spotlightWindow.setOpacity(1)
++          }
++
++          return cropped.toDataURL()
++        } catch (err) {
++          log.error('spotlight:captureRegion failed:', err)
++          // Restore spotlight on error
++          spotlightWindow?.setOpacity(1)
++          return null
++        }
++      }
++    )
++
++    // ── Voice Input ─────────────────────────────────────
++
++    // Check microphone permission (macOS)
++    ipcMain.handle('voiceInput:micPermission', async (event) => {
++      requireVoiceCaller(event)
++      if (process.platform === 'darwin') {
++        const status = systemPreferences.getMediaAccessStatus('microphone')
++        if (status !== 'granted') {
++          const granted = await systemPreferences.askForMediaAccess('microphone')
++          return granted ? 'granted' : 'denied'
++        }
++        return 'granted'
++      }
++      return 'granted' // Windows/Linux don't need explicit permission
++    })
++
++    // Transcribe audio via the connected server's STT endpoint
++    ipcMain.handle('voiceInput:transcribe', async (event, sessionId: number, audioBuffer: ArrayBuffer) => {
++      requireVoiceCaller(event)
++      if (!(audioBuffer instanceof ArrayBuffer)) {
++        throw new Error('Invalid voice input buffer')
++      }
++      try {
++        const { token, url, signal } = await voiceSessions.claim(sessionId, await currentVoiceTarget())
++
++        // Build multipart form data manually using Node.js
++        const boundary = '----VoiceInput' + Date.now()
++        const buffer = Buffer.from(audioBuffer)
++        const filename = `recording-${Date.now()}.wav`
++
++        const header = [
++          `--${boundary}`,
++          `Content-Disposition: form-data; name="file"; filename="${filename}"`,
++          `Content-Type: audio/wav`,
++          '',
++          ''
++        ].join('\r\n')
++
++        const footer = `\r\n--${boundary}--\r\n`
++        const headerBuf = Buffer.from(header, 'utf-8')
++        const footerBuf = Buffer.from(footer, 'utf-8')
++        const body = Buffer.concat([headerBuf, buffer, footerBuf])
++
++        const response = await fetch(`${url}/api/v1/audio/transcriptions`, {
++          method: 'POST',
++          headers: {
++            'Authorization': `Bearer ${token}`,
++            'Content-Type': `multipart/form-data; boundary=${boundary}`
++          },
++          body, redirect: 'error', signal
++        })
++
++        if (!response.ok) {
++          // Provider error bodies can contain private details; do not log/relay them.
++          throw new Error(`Transcription failed (HTTP ${response.status}). Check that your server has Speech-to-Text configured.`)
++        }
++
++        const result = await response.json()
++        voiceSessions.finish(sessionId, result?.text)
++        return { text: result.text }
++      } catch (error: any) {
++        const wasCurrent = voiceSessions.id === sessionId
++        voiceSessions.cancel(sessionId)
++        if (!wasCurrent) throw new Error('Voice input expired')
++        voiceInputRecording = false
++        voiceInputWindow?.hide()
++        log.error('voiceInput:transcribe failed:', error instanceof Error ? error.message : 'unavailable')
++        new Notification({
++          title: nativeText('Voice Input Failed'),
++          body: error?.message || 'Transcription failed. Check logs for details.'
++        }).show()
++        throw error
++      }
++    })
++
++    // Voice input completed — deliver text to chat
++    ipcMain.handle('voiceInput:done', async (event, sessionId: number) => {
++      requireVoiceCaller(event)
++      const result = await voiceSessions.deliver(sessionId, await currentVoiceTarget())
++      voiceInputRecording = false
++      playChime(false)
++      voiceInputWindow?.hide()
++      if (!result.text) return
++      sendToRenderer('query', { query: result.text, connectionId: result.target.connectionId, url: result.target.url })
++      showMainWindow()
++    })
++
++    // Voice input window requests close
++    ipcMain.handle('voiceInput:close', (event, sessionId: number) => {
++      requireVoiceCaller(event)
++      if (voiceSessions.id !== sessionId) return
++      voiceSessions.cancel(sessionId)
++      voiceInputRecording = false
++      playChime(false)
++      if (voiceInputWindow && !voiceInputWindow.isDestroyed()) {
++        voiceInputWindow.hide()
++      }
++    })
++
++    // Voice input error
++    ipcMain.handle('voiceInput:error', (event, sessionId: number, message: string) => {
++      requireVoiceCaller(event)
++      if (voiceSessions.id !== sessionId) return
++      voiceSessions.cancel(sessionId)
++      voiceInputWindow?.hide()
++      log.warn('Voice input error:', typeof message === 'string' ? message.slice(0, 1000) : 'unavailable')
++      voiceInputRecording = false
++      new Notification({
++        title: nativeText('Voice Input Error'),
++        body: message || 'An unknown error occurred with voice input.'
++      }).show()
++    })
++
++    // Open Terminal
++    ipcMain.handle('open-terminal:start', async () => {
++      if (isQuiting) return null
++      try {
++        return await startOpenTerminal(null, status => sendToRenderer('status:open-terminal-setup', status))
++      } catch (error) {
++        sendToRenderer('error', { message: error instanceof Error ? error.message : 'Open Terminal failed' })
++        return null
++      } finally { sendToRenderer('status:open-terminal-setup', '') }
++    })
++    ipcMain.handle('open-terminal:update', async () => {
++      if (isQuiting) throw new Error('Application is shutting down')
++      try {
++        return await updateOpenTerminal(status => sendToRenderer('status:open-terminal-setup', status))
++      } finally { sendToRenderer('status:open-terminal-setup', '') }
++    })
++    ipcMain.handle('open-terminal:stop', async () => {
++      await stopOpenTerminal()
++      return true
++    })
++
++    ipcMain.handle('open-terminal:info', () => getOpenTerminalInfo())
++    ipcMain.handle('open-terminal:status', () => isPackageInstalled('open-terminal'))
++
+     // llama.cpp
+     ipcMain.handle('llamacpp:setup', async () => {
+       try {
+@@ -985,6 +1804,10 @@ if (!gotTheLock) {
+ 
+     ipcMain.handle('package:version', (_event, packageName: string) => getPackageVersion(packageName))
+     ipcMain.handle('package:uninstall', async (_event, packageName: string) => {
++      const config = await getConfig()
++      if (config.localServer?.managedBackend === true && ['open-webui', 'open-terminal'].includes(packageName)) {
++        throw new Error('Project-managed packages must be maintained through the project controller')
++      }
+       const result = uninstallPackage(packageName)
+       // Notify renderer of install state change
+       sendToRenderer('packages:changed', {
+@@ -996,6 +1819,8 @@ if (!gotTheLock) {
+ 
+     ipcMain.handle('dialog:selectFolder', async () => {
+       const result = await dialog.showOpenDialog(mainWindow!, {
++        title: nativeText('Select a folder'),
++        buttonLabel: nativeText('Select folder'),
+         properties: ['openDirectory']
+       })
+       return result.canceled ? null : result.filePaths[0] ?? null
+@@ -1056,7 +1881,7 @@ if (!gotTheLock) {
+ 
+ 
+     // Global shortcut
+-    registerShortcuts(CONFIG.globalShortcut)
++    registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut)
+ 
+     createMainWindow(!CONFIG.startMinimized)
+     // Show startup logs immediately while the service prepares and becomes ready.
+@@ -1071,6 +1896,12 @@ if (!gotTheLock) {
+         .finally(() => sendToRenderer('status:llamacpp-setup', ''))
+     }
+ 
++    if (CONFIG?.openTerminal?.enabled) {
++      startOpenTerminal(null, status => sendToRenderer('status:open-terminal-setup', status))
++        .catch(error => log.warn('Open Terminal auto-connect failed:', error instanceof Error ? error.message : 'unavailable'))
++        .finally(() => sendToRenderer('status:open-terminal-setup', ''))
++    }
++
+     // Initialize auto-updater
+     initUpdater(sendToRenderer, CONFIG.automaticUpdates)
+ 
+@@ -1097,7 +1928,8 @@ if (!gotTheLock) {
+     if (cleanupStarted) return
+     cleanupStarted = true
+     isQuiting = true
+-    Promise.allSettled([llamaService.shutdown(), shutdownOllama(), webuiService.shutdown()]).then((results) => {
++    voiceSessions.cancel()
++    Promise.allSettled([llamaService.shutdown(), shutdownOllama(), webuiService.shutdown(), terminalService.shutdown()]).then((results) => {
+       for (const result of results) {
+         if (result.status === 'rejected') log.error('Service shutdown failed:', result.reason)
+       }
+diff --git a/src/preload/index.d.ts b/src/preload/index.d.ts
+index 7e2ca49d3484eb331d8661edbb2c65ff6dfc1193..8092df8dba3e2c64e051cab0a3ac26c1ae8de9b4 100644
+--- a/src/preload/index.d.ts
++++ b/src/preload/index.d.ts
+@@ -1,8 +1,13 @@
++import type { DesktopAPI } from './index'
++import type { SpotlightAPI } from './spotlight-preload'
++import type { VoiceInputAPI } from './voice-input-preload'
++
+ declare global {
+   interface Window {
+     electron: { process: { versions: NodeJS.ProcessVersions } }
++    electronAPI: DesktopAPI
++    spotlightAPI: SpotlightAPI
++    voiceInputAPI: VoiceInputAPI
+     api: unknown
+   }
+ }
+-
+-export {}
+diff --git a/src/preload/index.ts b/src/preload/index.ts
+index cae44bc4fcfe310ea30c837776e47bdd7ac70fc0..58d160b1dd2af85f8ec7ae77f0f680310d460f42 100644
+--- a/src/preload/index.ts
++++ b/src/preload/index.ts
+@@ -23,6 +23,8 @@ ipcRenderer.on('terminal:port', (event, id: number) => {
+   if (port) terminals.accept(id, port)
+ })
+ 
++export type DesktopAPI = typeof api
++
+ const api = {
+   onData: (callback: (data: any) => void) => {
+     const handler = (_: any, data: any): void => callback(data)
+@@ -32,6 +34,7 @@ const api = {
+ 
+   // App
+   getAppInfo: () => ipcRenderer.invoke('app:info'),
++  isWindowFocused: () => ipcRenderer.invoke('window:isFocused'),
+   getVersion: () => ipcRenderer.invoke('get:version'),
+   resetApp: () => ipcRenderer.invoke('app:reset'),
+   getDefaultDataPath: () => ipcRenderer.invoke('app:defaultDataPath'),
+@@ -81,6 +84,12 @@ const api = {
+     return () => terminals.disconnect(id)
+   },
+ 
++  // Open Terminal
++  startOpenTerminal: () => ipcRenderer.invoke('open-terminal:start'),
++  updateOpenTerminal: () => ipcRenderer.invoke('open-terminal:update'),
++  stopOpenTerminal: () => ipcRenderer.invoke('open-terminal:stop'),
++  getOpenTerminalInfo: () => ipcRenderer.invoke('open-terminal:info'),
++  getOpenTerminalStatus: () => ipcRenderer.invoke('open-terminal:status'),
+   // Ollama
+   setupOllama: () => ipcRenderer.invoke('ollama:setup'),
+   startOllama: () => ipcRenderer.invoke('ollama:start'),
+@@ -122,12 +131,27 @@ const api = {
+ 
+   openLocalWebUI: () => ipcRenderer.invoke('server:open'),
+ 
++  // Connections
++  getConnections: () => ipcRenderer.invoke('connections:list'),
++  addConnection: (connection: any) => ipcRenderer.invoke('connections:add', connection),
++  removeConnection: (id: string) => ipcRenderer.invoke('connections:remove', id),
++  updateConnection: (id: string, updates: any) => ipcRenderer.invoke('connections:update', id, updates),
++  setDefaultConnection: (id: string) => ipcRenderer.invoke('connections:setDefault', id),
++  connectTo: (id: string) => ipcRenderer.invoke('connections:connect', id),
++  validateUrl: (url: string) => ipcRenderer.invoke('validate:url', url),
++  selectFolder: () => ipcRenderer.invoke('dialog:selectFolder'),
++
+   // Updater
+   getUpdateState: () => ipcRenderer.invoke('updater:state'),
+   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+   installUpdate: () => ipcRenderer.invoke('updater:install'),
+ 
++  // Legacy auth notifications need no token cache; voice reads the exact owned guest.
++  setAuthToken: (_token: string) => Promise.resolve(),
++  registerConnectionGuest: (id: string, guestId: number) => ipcRenderer.invoke('connection:guest', id, guestId),
++  unregisterConnectionGuest: (id: string, guestId: number) => ipcRenderer.invoke('connection:guest:remove', id, guestId),
++
+   // Changelog
+   getChangelog: () => ipcRenderer.invoke('app:changelog')
+ }
+diff --git a/src/preload/spotlight-preload.ts b/src/preload/spotlight-preload.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4114793e57e555c8aa8613325cb6a53e2c191d2
+--- /dev/null
++++ b/src/preload/spotlight-preload.ts
+@@ -0,0 +1,45 @@
++import { ipcRenderer, contextBridge } from 'electron'
++
++export type SpotlightAPI = typeof api
++
++const api = {
++  submitQuery: (query: string, images?: string[]): void => {
++    ipcRenderer.invoke('spotlight:submit', query, images)
++  },
++  closeSpotlight: (): void => {
++    ipcRenderer.invoke('spotlight:close')
++  },
++  captureRegion: (rect: {
++    x: number
++    y: number
++    width: number
++    height: number
++  }): Promise<string | null> => {
++    return ipcRenderer.invoke('spotlight:captureRegion', rect)
++  },
++  savePosition: (offset: { x: number; y: number }): void => {
++    ipcRenderer.invoke('spotlight:savePosition', offset)
++  },
++  onInit: (
++    callback: (data: {
++      barOffset: { x: number; y: number } | null
++      screenSize: { width: number; height: number }
++      query: string
++    }) => void
++  ): void => {
++    ipcRenderer.on('spotlight:init', (_event, data) => {
++      callback(data)
++    })
++  }
++}
++
++if (process.contextIsolated) {
++  try {
++    contextBridge.exposeInMainWorld('spotlightAPI', api)
++  } catch (error) {
++    console.error(error)
++  }
++} else {
++  // @ts-ignore
++  window.spotlightAPI = api
++}
+diff --git a/src/renderer/index.html b/src/renderer/index.html
+index 00879db68603a88069c8af383c5c657b7b49172f..7663d741be0f678a7532352d8a27727dd00659a1 100644
+--- a/src/renderer/index.html
++++ b/src/renderer/index.html
+@@ -1,17 +1,17 @@
+-<!doctype html>
+-<html lang="en">
+-  <head>
+-    <meta charset="UTF-8" />
+-    <title>Open WebUI</title>
+-    <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
+-    <meta
+-      http-equiv="Content-Security-Policy"
+-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' https://community.s3.openwebui.com; connect-src 'self' https://community.s3.openwebui.com https://fonts.googleapis.com https://fonts.gstatic.com"
+-    />
+-  </head>
+-
+-  <body>
+-    <div id="app"></div>
+-    <script type="module" src="/src/main.ts"></script>
+-  </body>
+-</html>
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <title>Open WebUI</title>
++    <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
++    <meta
++      http-equiv="Content-Security-Policy"
++      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' https://community.s3.openwebui.com; connect-src 'self' https://community.s3.openwebui.com https://fonts.googleapis.com https://fonts.gstatic.com"
++    />
++  </head>
++
++  <body>
++    <div id="app"></div>
++    <script type="module" src="/src/main.ts"></script>
++  </body>
++</html>
+diff --git a/src/renderer/spotlight.html b/src/renderer/spotlight.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..55fd0381a3b0015315c3904795123c7252e9797e
+--- /dev/null
++++ b/src/renderer/spotlight.html
+@@ -0,0 +1,15 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <title>Open WebUI – Spotlight</title>
++    <meta
++      http-equiv="Content-Security-Policy"
++      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
++    />
++  </head>
++  <body>
++    <div id="app"></div>
++    <script type="module" src="/src/spotlight-main.ts"></script>
++  </body>
++</html>
+diff --git a/src/renderer/src/App.svelte b/src/renderer/src/App.svelte
+index 20a1e106df146b74aa42b7f7944f585f6ac00b29..ae300ffebddfcaf63970f40a4a253c76e9fd48d9 100644
+--- a/src/renderer/src/App.svelte
++++ b/src/renderer/src/App.svelte
+@@ -1,6 +1,5 @@
+ <script lang="ts">
+   import { onMount, onDestroy } from 'svelte'
+-  import { fade } from 'svelte/transition'
+   import { appInfo, config, serverInfo, appState, desktopUpdate } from './lib/stores'
+ 
+   import Main from './lib/components/Main.svelte'
+diff --git a/src/renderer/src/assets/base.css b/src/renderer/src/assets/base.css
+index bf77ac4f588051a957f8ecc45c729ca8be4f291f..a3a94494e59c225817bdff349b041c527fb869e7 100644
+--- a/src/renderer/src/assets/base.css
++++ b/src/renderer/src/assets/base.css
+@@ -1,79 +1,79 @@
+-:root {
+-  --ev-c-white: #ffffff;
+-  --ev-c-white-soft: #f8f8f8;
+-  --ev-c-white-mute: #f2f2f2;
+-
+-  --ev-c-black: #1b1b1f;
+-  --ev-c-black-soft: #222222;
+-  --ev-c-black-mute: #282828;
+-
+-  --ev-c-gray-1: #515c67;
+-  --ev-c-gray-2: #414853;
+-  --ev-c-gray-3: #32363f;
+-
+-  --ev-c-text-1: rgba(255, 255, 245, 0.86);
+-  --ev-c-text-2: rgba(235, 235, 245, 0.6);
+-  --ev-c-text-3: rgba(235, 235, 245, 0.38);
+-
+-  --ev-button-alt-border: transparent;
+-  --ev-button-alt-text: var(--ev-c-text-1);
+-  --ev-button-alt-bg: var(--ev-c-gray-3);
+-  --ev-button-alt-hover-border: transparent;
+-  --ev-button-alt-hover-text: var(--ev-c-text-1);
+-  --ev-button-alt-hover-bg: var(--ev-c-gray-2);
+-}
+-
+-:root {
+-  --color-background: var(--ev-c-black);
+-  --color-background-soft: var(--ev-c-black-soft);
+-  --color-background-mute: var(--ev-c-black-mute);
+-
+-  --color-text: var(--ev-c-text-1);
+-}
+-
+-*,
+-*::before,
+-*::after {
+-  box-sizing: border-box;
+-  margin: 0;
+-  font-weight: normal;
+-}
+-
+-ul {
+-  list-style: none;
+-}
+-
+-body {
+-  min-height: 100vh;
+-  color: var(--color-text);
+-  background: var(--color-background);
+-  line-height: 1.6;
+-  font-family:
+-    Inter,
+-    -apple-system,
+-    BlinkMacSystemFont,
+-    'Segoe UI',
+-    Roboto,
+-    Oxygen,
+-    Ubuntu,
+-    Cantarell,
+-    'Fira Sans',
+-    'Droid Sans',
+-    'Helvetica Neue',
+-    sans-serif;
+-  text-rendering: optimizeLegibility;
+-  -webkit-font-smoothing: antialiased;
+-  -moz-osx-font-smoothing: grayscale;
+-}
+-
+-/* Light theme overrides */
+-html.light {
+-  --color-background: #f5f5f7;
+-  --color-background-soft: #e8e8ed;
+-  --color-background-mute: #d1d1d6;
+-  --color-text: #1d1d1f;
+-  --ev-c-text-1: rgba(29, 29, 31, 0.9);
+-  --ev-c-text-2: rgba(29, 29, 31, 0.6);
+-  --ev-c-text-3: rgba(29, 29, 31, 0.4);
+-  color-scheme: light;
+-}
++:root {
++  --ev-c-white: #ffffff;
++  --ev-c-white-soft: #f8f8f8;
++  --ev-c-white-mute: #f2f2f2;
++
++  --ev-c-black: #1b1b1f;
++  --ev-c-black-soft: #222222;
++  --ev-c-black-mute: #282828;
++
++  --ev-c-gray-1: #515c67;
++  --ev-c-gray-2: #414853;
++  --ev-c-gray-3: #32363f;
++
++  --ev-c-text-1: rgba(255, 255, 245, 0.86);
++  --ev-c-text-2: rgba(235, 235, 245, 0.6);
++  --ev-c-text-3: rgba(235, 235, 245, 0.38);
++
++  --ev-button-alt-border: transparent;
++  --ev-button-alt-text: var(--ev-c-text-1);
++  --ev-button-alt-bg: var(--ev-c-gray-3);
++  --ev-button-alt-hover-border: transparent;
++  --ev-button-alt-hover-text: var(--ev-c-text-1);
++  --ev-button-alt-hover-bg: var(--ev-c-gray-2);
++}
++
++:root {
++  --color-background: var(--ev-c-black);
++  --color-background-soft: var(--ev-c-black-soft);
++  --color-background-mute: var(--ev-c-black-mute);
++
++  --color-text: var(--ev-c-text-1);
++}
++
++*,
++*::before,
++*::after {
++  box-sizing: border-box;
++  margin: 0;
++  font-weight: normal;
++}
++
++ul {
++  list-style: none;
++}
++
++body {
++  min-height: 100vh;
++  color: var(--color-text);
++  background: var(--color-background);
++  line-height: 1.6;
++  font-family:
++    Inter,
++    -apple-system,
++    BlinkMacSystemFont,
++    'Segoe UI',
++    Roboto,
++    Oxygen,
++    Ubuntu,
++    Cantarell,
++    'Fira Sans',
++    'Droid Sans',
++    'Helvetica Neue',
++    sans-serif;
++  text-rendering: optimizeLegibility;
++  -webkit-font-smoothing: antialiased;
++  -moz-osx-font-smoothing: grayscale;
++}
++
++/* Light theme overrides */
++html.light {
++  --color-background: #f5f5f7;
++  --color-background-soft: #e8e8ed;
++  --color-background-mute: #d1d1d6;
++  --color-text: #1d1d1f;
++  --ev-c-text-1: rgba(29, 29, 31, 0.9);
++  --ev-c-text-2: rgba(29, 29, 31, 0.6);
++  --ev-c-text-3: rgba(29, 29, 31, 0.4);
++  color-scheme: light;
++}
+diff --git a/src/renderer/src/assets/electron.svg b/src/renderer/src/assets/electron.svg
+index 45ef09cf4f49bad4ee721b62cd7afa16c8fe7f17..baeeeebd5c55c74f5e47efa953e70334afc20623 100644
+--- a/src/renderer/src/assets/electron.svg
++++ b/src/renderer/src/assets/electron.svg
+@@ -1,10 +1,10 @@
+-<svg viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+-  <circle cx="64" cy="64" r="64" fill="#2F3242"/>
+-  <ellipse cx="63.9835" cy="23.2036" rx="4.48794" ry="4.495" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
+-  <path d="M51.3954 39.5028C52.3733 39.6812 53.3108 39.033 53.4892 38.055C53.6676 37.0771 53.0194 36.1396 52.0414 35.9612L51.3954 39.5028ZM28.6153 43.5751L30.1748 44.4741L30.1748 44.4741L28.6153 43.5751ZM28.9393 60.9358C29.4332 61.7985 30.5329 62.0976 31.3957 61.6037C32.2585 61.1098 32.5575 60.0101 32.0636 59.1473L28.9393 60.9358ZM37.6935 66.7457C37.025 66.01 35.8866 65.9554 35.1508 66.6239C34.415 67.2924 34.3605 68.4308 35.029 69.1666L37.6935 66.7457ZM53.7489 81.7014L52.8478 83.2597L53.7489 81.7014ZM96.9206 89.515C97.7416 88.9544 97.9526 87.8344 97.3919 87.0135C96.8313 86.1925 95.7113 85.9815 94.8904 86.5422L96.9206 89.515ZM52.0414 35.9612C46.4712 34.9451 41.2848 34.8966 36.9738 35.9376C32.6548 36.9806 29.0841 39.1576 27.0559 42.6762L30.1748 44.4741C31.5693 42.0549 34.1448 40.3243 37.8188 39.4371C41.5009 38.5479 46.1547 38.5468 51.3954 39.5028L52.0414 35.9612ZM27.0559 42.6762C24.043 47.9029 25.2781 54.5399 28.9393 60.9358L32.0636 59.1473C28.6579 53.1977 28.1088 48.0581 30.1748 44.4741L27.0559 42.6762ZM35.029 69.1666C39.6385 74.24 45.7158 79.1355 52.8478 83.2597L54.6499 80.1432C47.8081 76.1868 42.0298 71.5185 37.6935 66.7457L35.029 69.1666ZM52.8478 83.2597C61.344 88.1726 70.0465 91.2445 77.7351 92.3608C85.359 93.4677 92.2744 92.6881 96.9206 89.515L94.8904 86.5422C91.3255 88.9767 85.4902 89.849 78.2524 88.7982C71.0793 87.7567 62.809 84.8612 54.6499 80.1432L52.8478 83.2597ZM105.359 84.9077C105.359 81.4337 102.546 78.6127 99.071 78.6127V82.2127C100.553 82.2127 101.759 83.4166 101.759 84.9077H105.359ZM99.071 78.6127C95.5956 78.6127 92.7831 81.4337 92.7831 84.9077H96.3831C96.3831 83.4166 97.5892 82.2127 99.071 82.2127V78.6127ZM92.7831 84.9077C92.7831 88.3817 95.5956 91.2027 99.071 91.2027V87.6027C97.5892 87.6027 96.3831 86.3988 96.3831 84.9077H92.7831ZM99.071 91.2027C102.546 91.2027 105.359 88.3817 105.359 84.9077H101.759C101.759 86.3988 100.553 87.6027 99.071 87.6027V91.2027Z" fill="#A2ECFB"/>
+-  <path d="M91.4873 65.382C90.8456 66.1412 90.9409 67.2769 91.7002 67.9186C92.4594 68.5603 93.5951 68.465 94.2368 67.7058L91.4873 65.382ZM99.3169 43.6354L97.7574 44.5344L99.3169 43.6354ZM84.507 35.2412C83.513 35.2282 82.6967 36.0236 82.6838 37.0176C82.6708 38.0116 83.4661 38.8279 84.4602 38.8409L84.507 35.2412ZM74.9407 39.8801C75.9127 39.6716 76.5315 38.7145 76.323 37.7425C76.1144 36.7706 75.1573 36.1517 74.1854 36.3603L74.9407 39.8801ZM53.7836 46.3728L54.6847 47.931L53.7836 46.3728ZM25.5491 80.9047C25.6932 81.8883 26.6074 82.5688 27.5911 82.4247C28.5747 82.2806 29.2552 81.3664 29.1111 80.3828L25.5491 80.9047ZM94.2368 67.7058C97.8838 63.3907 100.505 58.927 101.752 54.678C103.001 50.4213 102.9 46.2472 100.876 42.7365L97.7574 44.5344C99.1494 46.9491 99.3603 50.0419 98.2974 53.6644C97.2323 57.2945 94.9184 61.3223 91.4873 65.382L94.2368 67.7058ZM100.876 42.7365C97.9119 37.5938 91.7082 35.335 84.507 35.2412L84.4602 38.8409C91.1328 38.9278 95.7262 41.0106 97.7574 44.5344L100.876 42.7365ZM74.1854 36.3603C67.4362 37.8086 60.0878 40.648 52.8826 44.8146L54.6847 47.931C61.5972 43.9338 68.5948 41.2419 74.9407 39.8801L74.1854 36.3603ZM52.8826 44.8146C44.1366 49.872 36.9669 56.0954 32.1491 62.3927C27.3774 68.63 24.7148 75.2115 25.5491 80.9047L29.1111 80.3828C28.4839 76.1026 30.4747 70.5062 35.0084 64.5802C39.496 58.7143 46.2839 52.7889 54.6847 47.931L52.8826 44.8146Z" fill="#A2ECFB"/>
+-  <path d="M49.0825 87.2295C48.7478 86.2934 47.7176 85.8059 46.7816 86.1406C45.8455 86.4753 45.358 87.5055 45.6927 88.4416L49.0825 87.2295ZM78.5635 96.4256C79.075 95.5732 78.7988 94.4675 77.9464 93.9559C77.0941 93.4443 75.9884 93.7205 75.4768 94.5729L78.5635 96.4256ZM79.5703 85.1795C79.2738 86.1284 79.8027 87.1379 80.7516 87.4344C81.7004 87.7308 82.71 87.2019 83.0064 86.2531L79.5703 85.1795ZM84.3832 64.0673H82.5832H84.3832ZM69.156 22.5301C68.2477 22.1261 67.1838 22.535 66.7799 23.4433C66.3759 24.3517 66.7848 25.4155 67.6931 25.8194L69.156 22.5301ZM45.6927 88.4416C47.5994 93.7741 50.1496 98.2905 53.2032 101.505C56.2623 104.724 59.9279 106.731 63.9835 106.731V103.131C61.1984 103.131 58.4165 101.765 55.8131 99.0249C53.2042 96.279 50.8768 92.2477 49.0825 87.2295L45.6927 88.4416ZM63.9835 106.731C69.8694 106.731 74.8921 102.542 78.5635 96.4256L75.4768 94.5729C72.0781 100.235 68.0122 103.131 63.9835 103.131V106.731ZM83.0064 86.2531C85.0269 79.7864 86.1832 72.1831 86.1832 64.0673H82.5832C82.5832 71.8536 81.4723 79.0919 79.5703 85.1795L83.0064 86.2531ZM86.1832 64.0673C86.1832 54.1144 84.4439 44.922 81.4961 37.6502C78.5748 30.4436 74.3436 24.8371 69.156 22.5301L67.6931 25.8194C71.6364 27.5731 75.3846 32.1564 78.1598 39.0026C80.9086 45.7836 82.5832 54.507 82.5832 64.0673H86.1832Z" fill="#A2ECFB"/>
+-  <path fill-rule="evenodd" clip-rule="evenodd" d="M103.559 84.9077C103.559 82.4252 101.55 80.4127 99.071 80.4127C96.5924 80.4127 94.5831 82.4252 94.5831 84.9077C94.5831 87.3902 96.5924 89.4027 99.071 89.4027C101.55 89.4027 103.559 87.3902 103.559 84.9077V84.9077Z" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
+-  <path fill-rule="evenodd" clip-rule="evenodd" d="M28.8143 89.4027C31.2929 89.4027 33.3023 87.3902 33.3023 84.9077C33.3023 82.4252 31.2929 80.4127 28.8143 80.4127C26.3357 80.4127 24.3264 82.4252 24.3264 84.9077C24.3264 87.3902 26.3357 89.4027 28.8143 89.4027V89.4027V89.4027Z" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
+-  <path fill-rule="evenodd" clip-rule="evenodd" d="M64.8501 68.0857C62.6341 68.5652 60.451 67.1547 59.9713 64.9353C59.4934 62.7159 60.9007 60.5293 63.1167 60.0489C65.3326 59.5693 67.5157 60.9798 67.9954 63.1992C68.4742 65.4186 67.066 67.6052 64.8501 68.0857Z" fill="#A2ECFB"/>
+-</svg>
++<svg viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
++  <circle cx="64" cy="64" r="64" fill="#2F3242"/>
++  <ellipse cx="63.9835" cy="23.2036" rx="4.48794" ry="4.495" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
++  <path d="M51.3954 39.5028C52.3733 39.6812 53.3108 39.033 53.4892 38.055C53.6676 37.0771 53.0194 36.1396 52.0414 35.9612L51.3954 39.5028ZM28.6153 43.5751L30.1748 44.4741L30.1748 44.4741L28.6153 43.5751ZM28.9393 60.9358C29.4332 61.7985 30.5329 62.0976 31.3957 61.6037C32.2585 61.1098 32.5575 60.0101 32.0636 59.1473L28.9393 60.9358ZM37.6935 66.7457C37.025 66.01 35.8866 65.9554 35.1508 66.6239C34.415 67.2924 34.3605 68.4308 35.029 69.1666L37.6935 66.7457ZM53.7489 81.7014L52.8478 83.2597L53.7489 81.7014ZM96.9206 89.515C97.7416 88.9544 97.9526 87.8344 97.3919 87.0135C96.8313 86.1925 95.7113 85.9815 94.8904 86.5422L96.9206 89.515ZM52.0414 35.9612C46.4712 34.9451 41.2848 34.8966 36.9738 35.9376C32.6548 36.9806 29.0841 39.1576 27.0559 42.6762L30.1748 44.4741C31.5693 42.0549 34.1448 40.3243 37.8188 39.4371C41.5009 38.5479 46.1547 38.5468 51.3954 39.5028L52.0414 35.9612ZM27.0559 42.6762C24.043 47.9029 25.2781 54.5399 28.9393 60.9358L32.0636 59.1473C28.6579 53.1977 28.1088 48.0581 30.1748 44.4741L27.0559 42.6762ZM35.029 69.1666C39.6385 74.24 45.7158 79.1355 52.8478 83.2597L54.6499 80.1432C47.8081 76.1868 42.0298 71.5185 37.6935 66.7457L35.029 69.1666ZM52.8478 83.2597C61.344 88.1726 70.0465 91.2445 77.7351 92.3608C85.359 93.4677 92.2744 92.6881 96.9206 89.515L94.8904 86.5422C91.3255 88.9767 85.4902 89.849 78.2524 88.7982C71.0793 87.7567 62.809 84.8612 54.6499 80.1432L52.8478 83.2597ZM105.359 84.9077C105.359 81.4337 102.546 78.6127 99.071 78.6127V82.2127C100.553 82.2127 101.759 83.4166 101.759 84.9077H105.359ZM99.071 78.6127C95.5956 78.6127 92.7831 81.4337 92.7831 84.9077H96.3831C96.3831 83.4166 97.5892 82.2127 99.071 82.2127V78.6127ZM92.7831 84.9077C92.7831 88.3817 95.5956 91.2027 99.071 91.2027V87.6027C97.5892 87.6027 96.3831 86.3988 96.3831 84.9077H92.7831ZM99.071 91.2027C102.546 91.2027 105.359 88.3817 105.359 84.9077H101.759C101.759 86.3988 100.553 87.6027 99.071 87.6027V91.2027Z" fill="#A2ECFB"/>
++  <path d="M91.4873 65.382C90.8456 66.1412 90.9409 67.2769 91.7002 67.9186C92.4594 68.5603 93.5951 68.465 94.2368 67.7058L91.4873 65.382ZM99.3169 43.6354L97.7574 44.5344L99.3169 43.6354ZM84.507 35.2412C83.513 35.2282 82.6967 36.0236 82.6838 37.0176C82.6708 38.0116 83.4661 38.8279 84.4602 38.8409L84.507 35.2412ZM74.9407 39.8801C75.9127 39.6716 76.5315 38.7145 76.323 37.7425C76.1144 36.7706 75.1573 36.1517 74.1854 36.3603L74.9407 39.8801ZM53.7836 46.3728L54.6847 47.931L53.7836 46.3728ZM25.5491 80.9047C25.6932 81.8883 26.6074 82.5688 27.5911 82.4247C28.5747 82.2806 29.2552 81.3664 29.1111 80.3828L25.5491 80.9047ZM94.2368 67.7058C97.8838 63.3907 100.505 58.927 101.752 54.678C103.001 50.4213 102.9 46.2472 100.876 42.7365L97.7574 44.5344C99.1494 46.9491 99.3603 50.0419 98.2974 53.6644C97.2323 57.2945 94.9184 61.3223 91.4873 65.382L94.2368 67.7058ZM100.876 42.7365C97.9119 37.5938 91.7082 35.335 84.507 35.2412L84.4602 38.8409C91.1328 38.9278 95.7262 41.0106 97.7574 44.5344L100.876 42.7365ZM74.1854 36.3603C67.4362 37.8086 60.0878 40.648 52.8826 44.8146L54.6847 47.931C61.5972 43.9338 68.5948 41.2419 74.9407 39.8801L74.1854 36.3603ZM52.8826 44.8146C44.1366 49.872 36.9669 56.0954 32.1491 62.3927C27.3774 68.63 24.7148 75.2115 25.5491 80.9047L29.1111 80.3828C28.4839 76.1026 30.4747 70.5062 35.0084 64.5802C39.496 58.7143 46.2839 52.7889 54.6847 47.931L52.8826 44.8146Z" fill="#A2ECFB"/>
++  <path d="M49.0825 87.2295C48.7478 86.2934 47.7176 85.8059 46.7816 86.1406C45.8455 86.4753 45.358 87.5055 45.6927 88.4416L49.0825 87.2295ZM78.5635 96.4256C79.075 95.5732 78.7988 94.4675 77.9464 93.9559C77.0941 93.4443 75.9884 93.7205 75.4768 94.5729L78.5635 96.4256ZM79.5703 85.1795C79.2738 86.1284 79.8027 87.1379 80.7516 87.4344C81.7004 87.7308 82.71 87.2019 83.0064 86.2531L79.5703 85.1795ZM84.3832 64.0673H82.5832H84.3832ZM69.156 22.5301C68.2477 22.1261 67.1838 22.535 66.7799 23.4433C66.3759 24.3517 66.7848 25.4155 67.6931 25.8194L69.156 22.5301ZM45.6927 88.4416C47.5994 93.7741 50.1496 98.2905 53.2032 101.505C56.2623 104.724 59.9279 106.731 63.9835 106.731V103.131C61.1984 103.131 58.4165 101.765 55.8131 99.0249C53.2042 96.279 50.8768 92.2477 49.0825 87.2295L45.6927 88.4416ZM63.9835 106.731C69.8694 106.731 74.8921 102.542 78.5635 96.4256L75.4768 94.5729C72.0781 100.235 68.0122 103.131 63.9835 103.131V106.731ZM83.0064 86.2531C85.0269 79.7864 86.1832 72.1831 86.1832 64.0673H82.5832C82.5832 71.8536 81.4723 79.0919 79.5703 85.1795L83.0064 86.2531ZM86.1832 64.0673C86.1832 54.1144 84.4439 44.922 81.4961 37.6502C78.5748 30.4436 74.3436 24.8371 69.156 22.5301L67.6931 25.8194C71.6364 27.5731 75.3846 32.1564 78.1598 39.0026C80.9086 45.7836 82.5832 54.507 82.5832 64.0673H86.1832Z" fill="#A2ECFB"/>
++  <path fill-rule="evenodd" clip-rule="evenodd" d="M103.559 84.9077C103.559 82.4252 101.55 80.4127 99.071 80.4127C96.5924 80.4127 94.5831 82.4252 94.5831 84.9077C94.5831 87.3902 96.5924 89.4027 99.071 89.4027C101.55 89.4027 103.559 87.3902 103.559 84.9077V84.9077Z" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
++  <path fill-rule="evenodd" clip-rule="evenodd" d="M28.8143 89.4027C31.2929 89.4027 33.3023 87.3902 33.3023 84.9077C33.3023 82.4252 31.2929 80.4127 28.8143 80.4127C26.3357 80.4127 24.3264 82.4252 24.3264 84.9077C24.3264 87.3902 26.3357 89.4027 28.8143 89.4027V89.4027V89.4027Z" stroke="#A2ECFB" stroke-width="3.6" stroke-linecap="round"/>
++  <path fill-rule="evenodd" clip-rule="evenodd" d="M64.8501 68.0857C62.6341 68.5652 60.451 67.1547 59.9713 64.9353C59.4934 62.7159 60.9007 60.5293 63.1167 60.0489C65.3326 59.5693 67.5157 60.9798 67.9954 63.1992C68.4742 65.4186 67.066 67.6052 64.8501 68.0857Z" fill="#A2ECFB"/>
++</svg>
+diff --git a/src/renderer/src/assets/main.css b/src/renderer/src/assets/main.css
+index 3b800cf6b057df1ebd2133c42cd9419d87987226..d64487a84cc742afae967c71d0513508c0f4844c 100644
+--- a/src/renderer/src/assets/main.css
++++ b/src/renderer/src/assets/main.css
+@@ -1,171 +1,171 @@
+-@import './base.css';
+-
+-body {
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
+-  overflow: hidden;
+-  background-image: url('./wavy-lines.svg');
+-  background-size: cover;
+-  user-select: none;
+-}
+-
+-code {
+-  font-weight: 600;
+-  padding: 3px 5px;
+-  border-radius: 2px;
+-  background-color: var(--color-background-mute);
+-  font-family:
+-    ui-monospace,
+-    SFMono-Regular,
+-    SF Mono,
+-    Menlo,
+-    Consolas,
+-    Liberation Mono,
+-    monospace;
+-  font-size: 85%;
+-}
+-
+-#app {
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
+-  flex-direction: column;
+-  margin-bottom: 80px;
+-}
+-
+-.logo {
+-  margin-bottom: 20px;
+-  -webkit-user-drag: none;
+-  height: 128px;
+-  width: 128px;
+-  will-change: filter;
+-  transition: filter 300ms;
+-}
+-
+-.logo:hover {
+-  filter: drop-shadow(0 0 1.2em #6988e6aa);
+-}
+-
+-.creator {
+-  font-size: 14px;
+-  line-height: 16px;
+-  color: var(--ev-c-text-2);
+-  font-weight: 600;
+-  margin-bottom: 10px;
+-}
+-
+-.text {
+-  font-size: 28px;
+-  color: var(--ev-c-text-1);
+-  font-weight: 700;
+-  line-height: 32px;
+-  text-align: center;
+-  margin: 0 10px;
+-  padding: 16px 0;
+-}
+-
+-.tip {
+-  font-size: 16px;
+-  line-height: 24px;
+-  color: var(--ev-c-text-2);
+-  font-weight: 600;
+-}
+-
+-.svelte {
+-  background: -webkit-linear-gradient(315deg, #ff3e00 35%, #647eff);
+-  background-clip: text;
+-  -webkit-background-clip: text;
+-  -webkit-text-fill-color: transparent;
+-  font-weight: 700;
+-}
+-
+-.ts {
+-  background: -webkit-linear-gradient(315deg, #3178c6 45%, #f0dc4e);
+-  background-clip: text;
+-  -webkit-background-clip: text;
+-  -webkit-text-fill-color: transparent;
+-  font-weight: 700;
+-}
+-
+-.actions {
+-  display: flex;
+-  padding-top: 32px;
+-  margin: -6px;
+-  flex-wrap: wrap;
+-  justify-content: flex-start;
+-}
+-
+-.action {
+-  flex-shrink: 0;
+-  padding: 6px;
+-}
+-
+-.action a {
+-  cursor: pointer;
+-  text-decoration: none;
+-  display: inline-block;
+-  border: 1px solid transparent;
+-  text-align: center;
+-  font-weight: 600;
+-  white-space: nowrap;
+-  border-radius: 20px;
+-  padding: 0 20px;
+-  line-height: 38px;
+-  font-size: 14px;
+-  border-color: var(--ev-button-alt-border);
+-  color: var(--ev-button-alt-text);
+-  background-color: var(--ev-button-alt-bg);
+-}
+-
+-.action a:hover {
+-  border-color: var(--ev-button-alt-hover-border);
+-  color: var(--ev-button-alt-hover-text);
+-  background-color: var(--ev-button-alt-hover-bg);
+-}
+-
+-.versions {
+-  position: absolute;
+-  bottom: 30px;
+-  margin: 0 auto;
+-  padding: 15px 0;
+-  font-family: 'Menlo', 'Lucida Console', monospace;
+-  display: inline-flex;
+-  overflow: hidden;
+-  align-items: center;
+-  border-radius: 22px;
+-  background-color: #202127;
+-  backdrop-filter: blur(24px);
+-}
+-
+-.versions li {
+-  display: block;
+-  float: left;
+-  border-right: 1px solid var(--ev-c-gray-1);
+-  padding: 0 20px;
+-  font-size: 14px;
+-  line-height: 14px;
+-  opacity: 0.8;
+-  &:last-child {
+-    border: none;
+-  }
+-}
+-
+-@media (max-width: 720px) {
+-  .text {
+-    font-size: 20px;
+-  }
+-}
+-
+-@media (max-width: 620px) {
+-  .versions {
+-    display: none;
+-  }
+-}
+-
+-@media (max-width: 350px) {
+-  .tip,
+-  .actions {
+-    display: none;
+-  }
+-}
++@import './base.css';
++
++body {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  overflow: hidden;
++  background-image: url('./wavy-lines.svg');
++  background-size: cover;
++  user-select: none;
++}
++
++code {
++  font-weight: 600;
++  padding: 3px 5px;
++  border-radius: 2px;
++  background-color: var(--color-background-mute);
++  font-family:
++    ui-monospace,
++    SFMono-Regular,
++    SF Mono,
++    Menlo,
++    Consolas,
++    Liberation Mono,
++    monospace;
++  font-size: 85%;
++}
++
++#app {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  flex-direction: column;
++  margin-bottom: 80px;
++}
++
++.logo {
++  margin-bottom: 20px;
++  -webkit-user-drag: none;
++  height: 128px;
++  width: 128px;
++  will-change: filter;
++  transition: filter 300ms;
++}
++
++.logo:hover {
++  filter: drop-shadow(0 0 1.2em #6988e6aa);
++}
++
++.creator {
++  font-size: 14px;
++  line-height: 16px;
++  color: var(--ev-c-text-2);
++  font-weight: 600;
++  margin-bottom: 10px;
++}
++
++.text {
++  font-size: 28px;
++  color: var(--ev-c-text-1);
++  font-weight: 700;
++  line-height: 32px;
++  text-align: center;
++  margin: 0 10px;
++  padding: 16px 0;
++}
++
++.tip {
++  font-size: 16px;
++  line-height: 24px;
++  color: var(--ev-c-text-2);
++  font-weight: 600;
++}
++
++.svelte {
++  background: -webkit-linear-gradient(315deg, #ff3e00 35%, #647eff);
++  background-clip: text;
++  -webkit-background-clip: text;
++  -webkit-text-fill-color: transparent;
++  font-weight: 700;
++}
++
++.ts {
++  background: -webkit-linear-gradient(315deg, #3178c6 45%, #f0dc4e);
++  background-clip: text;
++  -webkit-background-clip: text;
++  -webkit-text-fill-color: transparent;
++  font-weight: 700;
++}
++
++.actions {
++  display: flex;
++  padding-top: 32px;
++  margin: -6px;
++  flex-wrap: wrap;
++  justify-content: flex-start;
++}
++
++.action {
++  flex-shrink: 0;
++  padding: 6px;
++}
++
++.action a {
++  cursor: pointer;
++  text-decoration: none;
++  display: inline-block;
++  border: 1px solid transparent;
++  text-align: center;
++  font-weight: 600;
++  white-space: nowrap;
++  border-radius: 20px;
++  padding: 0 20px;
++  line-height: 38px;
++  font-size: 14px;
++  border-color: var(--ev-button-alt-border);
++  color: var(--ev-button-alt-text);
++  background-color: var(--ev-button-alt-bg);
++}
++
++.action a:hover {
++  border-color: var(--ev-button-alt-hover-border);
++  color: var(--ev-button-alt-hover-text);
++  background-color: var(--ev-button-alt-hover-bg);
++}
++
++.versions {
++  position: absolute;
++  bottom: 30px;
++  margin: 0 auto;
++  padding: 15px 0;
++  font-family: 'Menlo', 'Lucida Console', monospace;
++  display: inline-flex;
++  overflow: hidden;
++  align-items: center;
++  border-radius: 22px;
++  background-color: #202127;
++  backdrop-filter: blur(24px);
++}
++
++.versions li {
++  display: block;
++  float: left;
++  border-right: 1px solid var(--ev-c-gray-1);
++  padding: 0 20px;
++  font-size: 14px;
++  line-height: 14px;
++  opacity: 0.8;
++  &:last-child {
++    border: none;
++  }
++}
++
++@media (max-width: 720px) {
++  .text {
++    font-size: 20px;
++  }
++}
++
++@media (max-width: 620px) {
++  .versions {
++    display: none;
++  }
++}
++
++@media (max-width: 350px) {
++  .tip,
++  .actions {
++    display: none;
++  }
++}
+diff --git a/src/renderer/src/assets/wavy-lines.svg b/src/renderer/src/assets/wavy-lines.svg
+index d08c6119920ca9e1dedacb1bfc6f8cc8a67e0d58..e60f94f495651e59e0fef12c0d31130e3483054c 100644
+--- a/src/renderer/src/assets/wavy-lines.svg
++++ b/src/renderer/src/assets/wavy-lines.svg
+@@ -1,25 +1,25 @@
+-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1422 800" opacity="0.3">
+-  <defs>
+-    <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="oooscillate-grad">
+-      <stop stop-color="hsl(206, 75%, 49%)" stop-opacity="1" offset="0%"></stop>
+-      <stop stop-color="hsl(331, 90%, 56%)" stop-opacity="1" offset="100%"></stop>
+-    </linearGradient>
+-  </defs>
+-  <g stroke-width="1" stroke="url(#oooscillate-grad)" fill="none" stroke-linecap="round">
+-    <path d="M 0 448 Q 355.5 -100 711 400 Q 1066.5 900 1422 448" opacity="0.05"></path>
+-    <path d="M 0 420 Q 355.5 -100 711 400 Q 1066.5 900 1422 420" opacity="0.11"></path>
+-    <path d="M 0 392 Q 355.5 -100 711 400 Q 1066.5 900 1422 392" opacity="0.18"></path>
+-    <path d="M 0 364 Q 355.5 -100 711 400 Q 1066.5 900 1422 364" opacity="0.24"></path>
+-    <path d="M 0 336 Q 355.5 -100 711 400 Q 1066.5 900 1422 336" opacity="0.30"></path>
+-    <path d="M 0 308 Q 355.5 -100 711 400 Q 1066.5 900 1422 308" opacity="0.37"></path>
+-    <path d="M 0 280 Q 355.5 -100 711 400 Q 1066.5 900 1422 280" opacity="0.43"></path>
+-    <path d="M 0 252 Q 355.5 -100 711 400 Q 1066.5 900 1422 252" opacity="0.49"></path>
+-    <path d="M 0 224 Q 355.5 -100 711 400 Q 1066.5 900 1422 224" opacity="0.56"></path>
+-    <path d="M 0 196 Q 355.5 -100 711 400 Q 1066.5 900 1422 196" opacity="0.62"></path>
+-    <path d="M 0 168 Q 355.5 -100 711 400 Q 1066.5 900 1422 168" opacity="0.68"></path>
+-    <path d="M 0 140 Q 355.5 -100 711 400 Q 1066.5 900 1422 140" opacity="0.75"></path>
+-    <path d="M 0 112 Q 355.5 -100 711 400 Q 1066.5 900 1422 112" opacity="0.81"></path>
+-    <path d="M 0 84 Q 355.5 -100 711 400 Q 1066.5 900 1422 84" opacity="0.87"></path>
+-    <path d="M 0 56 Q 355.5 -100 711 400 Q 1066.5 900 1422 56" opacity="0.94"></path>
+-  </g>
+-</svg>
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1422 800" opacity="0.3">
++  <defs>
++    <linearGradient x1="50%" y1="0%" x2="50%" y2="100%" id="oooscillate-grad">
++      <stop stop-color="hsl(206, 75%, 49%)" stop-opacity="1" offset="0%"></stop>
++      <stop stop-color="hsl(331, 90%, 56%)" stop-opacity="1" offset="100%"></stop>
++    </linearGradient>
++  </defs>
++  <g stroke-width="1" stroke="url(#oooscillate-grad)" fill="none" stroke-linecap="round">
++    <path d="M 0 448 Q 355.5 -100 711 400 Q 1066.5 900 1422 448" opacity="0.05"></path>
++    <path d="M 0 420 Q 355.5 -100 711 400 Q 1066.5 900 1422 420" opacity="0.11"></path>
++    <path d="M 0 392 Q 355.5 -100 711 400 Q 1066.5 900 1422 392" opacity="0.18"></path>
++    <path d="M 0 364 Q 355.5 -100 711 400 Q 1066.5 900 1422 364" opacity="0.24"></path>
++    <path d="M 0 336 Q 355.5 -100 711 400 Q 1066.5 900 1422 336" opacity="0.30"></path>
++    <path d="M 0 308 Q 355.5 -100 711 400 Q 1066.5 900 1422 308" opacity="0.37"></path>
++    <path d="M 0 280 Q 355.5 -100 711 400 Q 1066.5 900 1422 280" opacity="0.43"></path>
++    <path d="M 0 252 Q 355.5 -100 711 400 Q 1066.5 900 1422 252" opacity="0.49"></path>
++    <path d="M 0 224 Q 355.5 -100 711 400 Q 1066.5 900 1422 224" opacity="0.56"></path>
++    <path d="M 0 196 Q 355.5 -100 711 400 Q 1066.5 900 1422 196" opacity="0.62"></path>
++    <path d="M 0 168 Q 355.5 -100 711 400 Q 1066.5 900 1422 168" opacity="0.68"></path>
++    <path d="M 0 140 Q 355.5 -100 711 400 Q 1066.5 900 1422 140" opacity="0.75"></path>
++    <path d="M 0 112 Q 355.5 -100 711 400 Q 1066.5 900 1422 112" opacity="0.81"></path>
++    <path d="M 0 84 Q 355.5 -100 711 400 Q 1066.5 900 1422 84" opacity="0.87"></path>
++    <path d="M 0 56 Q 355.5 -100 711 400 Q 1066.5 900 1422 56" opacity="0.94"></path>
++  </g>
++</svg>
+diff --git a/src/renderer/src/components/Spotlight.svelte b/src/renderer/src/components/Spotlight.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a81c39b5147821f421e299590a0f95cf33be187
+--- /dev/null
++++ b/src/renderer/src/components/Spotlight.svelte
+@@ -0,0 +1,526 @@
++<script lang="ts">
++  import { onMount } from 'svelte'
++  import logoImage from '../lib/assets/images/splash.png'
++
++  let inputEl = $state<HTMLInputElement | null>(null)
++  let query = $state('')
++  let images = $state<string[]>([])
++  let errorMsg = $state('')
++  let showHint = $state(true)
++
++  // Bar position within the fullscreen window
++  let barX = $state(0)
++  let barY = $state(160)
++  let screenW = $state(1920)
++  let screenH = $state(1080)
++
++  const BAR_W = 748
++
++  const api = window.spotlightAPI
++
++  // ─── Error Toast ───
++  let errorTimer: ReturnType<typeof setTimeout> | null = null
++  const showError = (msg: string, duration = 4000) => {
++    errorMsg = msg
++    if (errorTimer) clearTimeout(errorTimer)
++    errorTimer = setTimeout(() => { errorMsg = '' }, duration)
++  }
++
++  // ─── Submit ───
++  const submit = () => {
++    const q = query.trim()
++    if (!q && images.length === 0) return
++    if (!api) return
++    // Svelte 5 $state creates Proxy objects that Electron IPC can't serialize.
++    // Spread into a plain array of plain strings for structured clone.
++    const plainImages = images.length > 0 ? [...images].map((s) => s.slice(0)) : undefined
++    api.submitQuery(q, plainImages)
++    query = ''
++    images = []
++  }
++
++  // ─── Bar Dragging ───
++  let barDragging = $state(false)
++  let barDragStart = { mx: 0, my: 0, bx: 0, by: 0 }
++
++  const onBarMouseDown = (e: MouseEvent) => {
++    // Only drag from the bar background, not from input or buttons
++    const target = e.target as HTMLElement
++    if (target.tagName === 'INPUT' || target.closest('button') || target.closest('.preview')) return
++    e.preventDefault()
++    barDragging = true
++    barDragStart = { mx: e.clientX, my: e.clientY, bx: barX, by: barY }
++  }
++
++  // ─── Region Selection ───
++  let selecting = $state(false)
++  let selStart = { x: 0, y: 0 }
++  let selRect = $state({ x: 0, y: 0, w: 0, h: 0 })
++  let didDrag = false
++  const DRAG_THRESHOLD = 8
++
++  const onWrapperMouseDown = (e: MouseEvent) => {
++    // Ignore if it's on the bar or preview
++    if ((e.target as HTMLElement).closest('.bar') || (e.target as HTMLElement).closest('.preview')) return
++    e.preventDefault()
++    selStart = { x: e.clientX, y: e.clientY }
++    selecting = true
++    didDrag = false
++    selRect = { x: e.clientX, y: e.clientY, w: 0, h: 0 }
++  }
++
++  const onMouseMove = (e: MouseEvent) => {
++    if (barDragging) {
++      const dx = e.clientX - barDragStart.mx
++      const dy = e.clientY - barDragStart.my
++      barX = Math.max(0, Math.min(screenW - BAR_W, barDragStart.bx + dx))
++      barY = Math.max(0, Math.min(screenH - 60, barDragStart.by + dy))
++      return
++    }
++    if (selecting) {
++      const dx = e.clientX - selStart.x
++      const dy = e.clientY - selStart.y
++      if (!didDrag && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
++        didDrag = true
++      }
++      selRect = {
++        x: Math.min(e.clientX, selStart.x),
++        y: Math.min(e.clientY, selStart.y),
++        w: Math.abs(dx),
++        h: Math.abs(dy)
++      }
++    }
++  }
++
++  const onMouseUp = async () => {
++    if (barDragging) {
++      barDragging = false
++      api?.savePosition({ x: barX, y: barY })
++      return
++    }
++    if (selecting) {
++      selecting = false
++      showHint = false
++      if (didDrag && selRect.w > 10 && selRect.h > 10) {
++        // Capture the selected region
++        const result = await api?.captureRegion({
++          x: selRect.x,
++          y: selRect.y,
++          width: selRect.w,
++          height: selRect.h
++        })
++        if (result === 'no-permission') {
++          showError('Screen Recording permission required. Opening System Settings…')
++        } else if (result && typeof result === 'string' && result.startsWith('data:')) {
++          images = [...images, result]
++        } else if (!result) {
++          showError('Screenshot capture failed.')
++        }
++        selRect = { x: 0, y: 0, w: 0, h: 0 }
++      } else {
++        // Click on background (not a drag) — dismiss
++        selRect = { x: 0, y: 0, w: 0, h: 0 }
++        api?.closeSpotlight()
++      }
++    }
++  }
++
++  const removeImage = (index: number) => {
++    images = images.filter((_, i) => i !== index)
++  }
++
++  onMount(() => {
++    inputEl?.focus()
++    window.addEventListener('focus', () => {
++      inputEl?.focus()
++    })
++
++    api?.onInit?.((data) => {
++      if (data.screenSize) {
++        screenW = data.screenSize.width
++        screenH = data.screenSize.height
++      }
++      if (data.barOffset) {
++        barX = data.barOffset.x
++        barY = data.barOffset.y
++      } else {
++        // Default: center horizontally, near top
++        barX = Math.round((screenW - BAR_W) / 2)
++        barY = 160
++      }
++      if (data.query) {
++        query = data.query
++        requestAnimationFrame(() => inputEl?.select())
++      }
++      requestAnimationFrame(() => inputEl?.focus())
++
++      // Show screenshot hint
++      showHint = true
++    })
++  })
++</script>
++
++<svelte:window
++  onkeydown={(e) => e.key === 'Escape' && api?.closeSpotlight()}
++  onmousemove={onMouseMove}
++  onmouseup={onMouseUp}
++/>
++
++<!-- svelte-ignore a11y_no_static_element_interactions -->
++<div class="wrapper" onmousedown={onWrapperMouseDown}>
++  <!-- Screen capture overlay -->
++  {#if selecting && didDrag}
++    <!-- Selection with shadow-based dimming -->
++    <div
++      class="selection"
++      style="left:{selRect.x}px;top:{selRect.y}px;width:{selRect.w}px;height:{selRect.h}px"
++    >
++      <div class="handle tl"></div>
++      <div class="handle tr"></div>
++      <div class="handle bl"></div>
++      <div class="handle br"></div>
++    </div>
++    <!-- Dimensions label -->
++    <div
++      class="dimensions"
++      style="left:{selRect.x + selRect.w / 2}px;top:{selRect.y + selRect.h + 12}px"
++    >
++      {Math.round(selRect.w)} × {Math.round(selRect.h)}
++    </div>
++  {/if}
++
++  <!-- Floating bar -->
++  <!-- svelte-ignore a11y_no_static_element_interactions -->
++  <div
++    class="bar"
++    style="left:{barX}px;top:{barY}px"
++    onmousedown={onBarMouseDown}
++  >
++    {#if images.length > 0}
++      <div class="attachments">
++        {#each images as img, i}
++          <div class="preview-item">
++            <img src={img} alt="Screenshot {i + 1}" />
++            <button class="preview-remove" onclick={() => removeImage(i)} aria-label="Remove">×</button>
++          </div>
++        {/each}
++      </div>
++    {/if}
++
++    <div class="input-row">
++      <img class="logo" src={logoImage} alt="" />
++
++      <input
++        bind:this={inputEl}
++        bind:value={query}
++        type="text"
++        placeholder="What can I help you with today?"
++        autocomplete="off"
++        spellcheck="false"
++        onkeydown={(e) => {
++          if (e.key === 'Enter' && !e.isComposing) {
++            e.preventDefault()
++            submit()
++          }
++        }}
++      />
++
++      <button class="send" class:active={query.trim().length > 0 || images.length > 0} aria-label="Send" onclick={submit}>
++        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
++          <path d="M12 19V5" />
++          <path d="M5 12l7-7 7 7" />
++        </svg>
++      </button>
++    </div>
++  </div>
++
++  <!-- Screenshot hint -->
++  {#if showHint && images.length === 0 && !selecting}
++    <div class="hint">
++      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
++        <path d="M4 8V6a2 2 0 012-2h2" /><path d="M4 16v2a2 2 0 002 2h2" /><path d="M16 4h2a2 2 0 012 2v2" /><path d="M16 20h2a2 2 0 002-2v-2" />
++      </svg>
++      Drag anywhere to capture a screenshot
++    </div>
++  {/if}
++
++  <!-- Error toast -->
++  {#if errorMsg}
++    <div class="error-toast">{errorMsg}</div>
++  {/if}
++</div>
++
++<style>
++  @font-face {
++    font-family: 'Archivo';
++    src: url('../lib/assets/fonts/Archivo-Variable.ttf');
++    font-display: swap;
++  }
++  :global(*) { margin: 0; padding: 0; box-sizing: border-box; }
++  :global(html), :global(body), :global(#app) {
++    height: 100%;
++    width: 100%;
++    background: transparent;
++    overflow: hidden;
++    user-select: none;
++    -webkit-font-smoothing: antialiased;
++  }
++
++  .wrapper {
++    position: fixed;
++    inset: 0;
++    cursor: crosshair;
++  }
++
++  .selection {
++    position: absolute;
++    border: 2px solid rgba(255, 255, 255, 0.9);
++    border-radius: 2px;
++    pointer-events: none;
++    z-index: 10;
++    /* Massive spread shadow dims everything outside the selection */
++    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
++  }
++
++  .handle {
++    position: absolute;
++    width: 6px;
++    height: 6px;
++    background: white;
++    border-radius: 1px;
++    box-shadow: 0 0 2px rgba(0, 0, 0, 0.4);
++  }
++  .handle.tl { top: -3px; left: -3px; }
++  .handle.tr { top: -3px; right: -3px; }
++  .handle.bl { bottom: -3px; left: -3px; }
++  .handle.br { bottom: -3px; right: -3px; }
++
++  .dimensions {
++    position: absolute;
++    transform: translateX(-50%);
++    padding: 3px 8px;
++    border-radius: 4px;
++    font-family: 'Archivo', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
++    font-size: 11px;
++    font-weight: 500;
++    letter-spacing: 0.02em;
++    color: rgba(255, 255, 255, 0.9);
++    background: rgba(0, 0, 0, 0.65);
++    backdrop-filter: blur(4px);
++    pointer-events: none;
++    z-index: 11;
++    white-space: nowrap;
++  }
++
++  .bar {
++    position: absolute;
++    width: 748px;
++    display: flex;
++    flex-direction: column;
++    border-radius: 14px;
++    font-family: 'Archivo', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
++    cursor: grab;
++    z-index: 100;
++    overflow: hidden;
++
++    background: #f5f5f7;
++    color: #1d1d1f;
++    border: 0.5px solid rgba(0, 0, 0, 0.08);
++    box-shadow:
++      0 2px 8px rgba(0, 0, 0, 0.06),
++      0 8px 24px rgba(0, 0, 0, 0.1);
++  }
++
++  @media (prefers-color-scheme: dark) {
++    .bar {
++      background: #1a1a1c;
++      color: #fafafa;
++      border-color: rgba(255, 255, 255, 0.08);
++      box-shadow:
++        0 2px 8px rgba(0, 0, 0, 0.2),
++        0 8px 24px rgba(0, 0, 0, 0.35);
++    }
++  }
++
++  .input-row {
++    display: flex;
++    align-items: center;
++    gap: 10px;
++    height: 52px;
++    padding: 0 9px 0 15px;
++  }
++
++  .logo {
++    width: 25px;
++    height: 25px;
++    flex-shrink: 0;
++    object-fit: contain;
++    opacity: 0.8;
++  }
++
++  @media (prefers-color-scheme: dark) {
++    .logo { filter: invert(1); }
++  }
++
++  input {
++    flex: 1;
++    min-width: 0;
++    border: none;
++    outline: none;
++    background: transparent;
++    font-family: inherit;
++    font-size: 17px;
++    font-weight: 450;
++    line-height: 1;
++    letter-spacing: -0.01em;
++    color: #1d1d1f;
++    cursor: text;
++  }
++
++  input::placeholder {
++    color: rgba(0, 0, 0, 0.22);
++  }
++
++  @media (prefers-color-scheme: dark) {
++    input { color: #fafafa; }
++    input::placeholder { color: rgba(255, 255, 255, 0.18); }
++  }
++
++  .send {
++    width: 30px;
++    height: 30px;
++    flex-shrink: 0;
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    border: none;
++    outline: none;
++    border-radius: 10px;
++    cursor: pointer;
++    transition: all 0.15s ease;
++
++    background: rgba(0, 0, 0, 0.05);
++    color: rgba(0, 0, 0, 0.18);
++  }
++
++  .send.active {
++    background: #1d1d1f;
++    color: #fff;
++  }
++
++  .send.active:hover { opacity: 0.8; }
++  .send.active:active { transform: scale(0.92); }
++
++  @media (prefers-color-scheme: dark) {
++    .send {
++      background: rgba(255, 255, 255, 0.06);
++      color: rgba(255, 255, 255, 0.15);
++    }
++    .send.active {
++      background: #fafafa;
++      color: #1d1d1f;
++    }
++  }
++
++  /* ─── Inline Attachments ─── */
++  .attachments {
++    display: flex;
++    gap: 6px;
++    padding: 10px 12px 0;
++    flex-wrap: wrap;
++  }
++
++  .preview-item {
++    position: relative;
++    width: 56px;
++    height: 56px;
++    border-radius: 8px;
++    overflow: hidden;
++    flex-shrink: 0;
++  }
++
++  .preview-item img {
++    width: 100%;
++    height: 100%;
++    object-fit: cover;
++  }
++
++  .preview-remove {
++    position: absolute;
++    top: 2px;
++    right: 2px;
++    width: 18px;
++    height: 18px;
++    border-radius: 50%;
++    border: none;
++    background: rgba(0, 0, 0, 0.6);
++    color: white;
++    font-size: 12px;
++    line-height: 1;
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    cursor: pointer;
++    opacity: 0;
++    transition: opacity 0.15s;
++  }
++
++  .preview-item:hover .preview-remove {
++    opacity: 1;
++  }
++
++  /* ─── Error Toast ─── */
++  .error-toast {
++    position: fixed;
++    bottom: 80px;
++    left: 50%;
++    transform: translateX(-50%);
++    padding: 10px 20px;
++    border-radius: 10px;
++    font-family: 'Archivo', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
++    font-size: 14px;
++    font-weight: 500;
++    color: #fff;
++    background: rgba(220, 38, 38, 0.9);
++    backdrop-filter: blur(8px);
++    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
++    z-index: 200;
++    pointer-events: none;
++    animation: toast-in 0.25s ease-out;
++  }
++
++  @keyframes toast-in {
++    from { opacity: 0; transform: translateX(-50%) translateY(10px); }
++    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
++  }
++
++  /* ─── Screenshot Hint ─── */
++  .hint {
++    position: fixed;
++    bottom: 48px;
++    left: 50%;
++    transform: translateX(-50%);
++    display: flex;
++    align-items: center;
++    gap: 8px;
++    padding: 8px 16px;
++    border-radius: 10px;
++    font-family: 'Archivo', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
++    font-size: 13px;
++    font-weight: 450;
++    z-index: 200;
++    pointer-events: none;
++    animation: hint-in 0.25s ease-out;
++
++    color: rgba(255, 255, 255, 0.8);
++    background: rgba(0, 0, 0, 0.55);
++    backdrop-filter: blur(12px);
++    -webkit-backdrop-filter: blur(12px);
++    border: 0.5px solid rgba(255, 255, 255, 0.1);
++  }
++
++  @keyframes hint-in {
++    from { opacity: 0; transform: translateX(-50%) translateY(6px); }
++    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
++  }
++</style>
+diff --git a/src/renderer/src/components/Versions.svelte b/src/renderer/src/components/Versions.svelte
+index 93ec9a6bd9b17c20dfdc35f018f3f8ebbb8e8204..b5e92afade9b516e64453b065430bad348c39b67 100644
+--- a/src/renderer/src/components/Versions.svelte
++++ b/src/renderer/src/components/Versions.svelte
+@@ -1,9 +1,9 @@
+-<script lang="ts">
+-  const versions = window.electron.process.versions
+-</script>
+-
+-<ul class="versions">
+-  <li class="electron-version">Electron v{versions.electron}</li>
+-  <li class="chrome-version">Chromium v{versions.chrome}</li>
+-  <li class="node-version">Node v{versions.node}</li>
+-</ul>
++<script lang="ts">
++  const versions = window.electron.process.versions
++</script>
++
++<ul class="versions">
++  <li class="electron-version">Electron v{versions.electron}</li>
++  <li class="chrome-version">Chromium v{versions.chrome}</li>
++  <li class="node-version">Node v{versions.node}</li>
++</ul>
+diff --git a/src/renderer/src/env.d.ts b/src/renderer/src/env.d.ts
+index 4078e7476a2eaf5705d327b5c9d459c234c01652..58d6450fb95f3a26c1f46fcb6f965994638cc28d 100644
+--- a/src/renderer/src/env.d.ts
++++ b/src/renderer/src/env.d.ts
+@@ -1,2 +1,2 @@
+-/// <reference types="svelte" />
+-/// <reference types="vite/client" />
++/// <reference types="svelte" />
++/// <reference types="vite/client" />
+diff --git a/src/renderer/src/lib/components/Main/Connections.svelte b/src/renderer/src/lib/components/Main/Connections.svelte
+index 25b223334f7364ef66f903e6cae817c98de9adb9..ea8d09b4dc4cef3aa83e93355c4c2ec19436acda 100644
+--- a/src/renderer/src/lib/components/Main/Connections.svelte
++++ b/src/renderer/src/lib/components/Main/Connections.svelte
+@@ -1,216 +1,526 @@
+ <script lang="ts">
+-  import { onMount, onDestroy } from 'svelte'
++  import { isGuestPushType, canRelayDesktopEvent } from '../../guest-protocol'
++  import { onMount } from 'svelte'
++  import { fade } from 'svelte/transition'
++  import { connections, config, serverInfo } from '../../stores'
+   import type { ServiceInfo } from '../../../../../shared/terminal'
+-  import { config, serverInfo } from '../../stores'
+   import i18n from '../../i18n'
++
++  import Sidebar from './Connections/Sidebar.svelte'
+   import Content from './Connections/Content.svelte'
+   import TerminalDock from './Connections/TerminalDock.svelte'
+ 
+-  let { onOpenSettings }: { onOpenSettings: () => void } = $props()
++  interface Props {
++    onOpenSettings: () => void
++    sidebarOpen?: boolean
++    activeConnectionName?: string
++  }
+ 
+-  let serverUrl = $state('')
+-  let content: Content | undefined = $state()
+-  let terminalDock: TerminalDock | undefined = $state()
+-  let canRefresh = $state(false)
++  let {
++    onOpenSettings,
++    sidebarOpen = $bindable(true),
++    activeConnectionName = $bindable('')
++  }: Props = $props()
++
++
++  let url = $state('')
+   let connecting = $state(false)
+-  let launchError = $state('')
+-  let localInstalled = $state(false)
+-  let installPhase = $state('idle')
++  let error = $state('')
++  let view = $state('welcome') // welcome | install | connected
++  let installPhase = $state('idle') // idle | working | error
+   let installError = $state('')
+-  let installStatus = $state('')
+   let toastVisible = $state(false)
+-  let toastTimeout: ReturnType<typeof setTimeout> | undefined
++  let toastTimeout: ReturnType<typeof setTimeout> | null = null
++  let installStatus = $state('')
++  let settingsOpen = $state(false)
++  let activeConnectionId = $state('')
++  let connectingId = $state('')
++  let openConnections: Map<string, string> = $state(new Map())
++  let localInstalled = $state(false)
++  let openTerminalInstalled = $state(false)
++  let showAddConnectionModal = $state(false)
++
++  // Active log panel
++  let content: Content | undefined = $state()
++  let terminalDock: TerminalDock | undefined = $state()
++  let canRefresh = $state(false)
++  let terminalInfo = $state<{ pid?: number | null; error?: string | null; external?: boolean } | null>(null)
++
+   const serverStatus = $derived($serverInfo?.status)
++  const serverReachable = $derived($serverInfo?.reachable)
++
++  const localConn = $derived(localInstalled
++    ? { id: 'local', name: 'Open WebUI', type: 'local' as const, url: `http://127.0.0.1:${$config?.localServer?.port ?? 8080}` }
++    : null
++  )
++  const remoteConnections = $derived($connections ?? [])
+ 
++  // Open Terminal state
++  let openTerminalStatus = $state<string | null>(null)
++
++  // Llama Server state
+   let llamaCppStatus = $state<string | null>(null)
+-  let llamaCppInfo = $state<{
+-    url?: string
+-    pid?: number | null
+-    binaryPath?: string
+-    error?: string
+-  } | null>(null)
++  let llamaCppInfo = $state<{ url?: string; pid?: number; binaryPath?: string } | null>(null)
+   let llamaCppSetupStatus = $state('')
++  let openTerminalSetupStatus = $state('')
+   let ollamaInfo = $state<(ServiceInfo & { binaryPath: string | null }) | null>(null)
+   let ollamaSetupStatus = $state('')
+ 
+-  const openWebUI = async (restart = false): Promise<boolean> => {
+-    if (connecting) return false
+-    connecting = true
+-    launchError = ''
+-    try {
+-      let result: { url?: string | null } | null
+-      if (restart) {
+-        serverUrl = ''
+-        result = (await window.electronAPI.restartServer())
+-          ? await window.electronAPI.getServerInfo()
+-          : null
+-      } else result = await window.electronAPI.openLocalWebUI()
+-      if (!result?.url) {
+-        const info = await window.electronAPI.getServerInfo()
+-        if (info.status === 'stopped' && !restart) return false
+-        throw new Error(info.error || $i18n.t('error.serverStartFailed'))
+-      }
+-      serverUrl = result.url
+-      return true
+-    } catch (error) {
+-      launchError = error instanceof Error ? error.message : String(error)
+-      return false
+-    } finally {
+-      connecting = false
+-    }
+-  }
+-
+-  const startInstall = async (options?: {
+-    installLlamaCpp?: boolean
+-    installOllama?: boolean
+-    installDir?: string
+-  }): Promise<void> => {
++  const startInstall = async (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => {
+     if (installPhase === 'working') return
+     installPhase = 'working'
+     installError = ''
+     installStatus = ''
+     toastVisible = false
+     try {
++      // Save custom install directory before anything else
+       if (options?.installDir) {
+         const currentDir = await window.electronAPI.getInstallDir()
+         if (options.installDir !== currentDir) {
+           await window.electronAPI.setConfig({ installDir: options.installDir })
+         }
+       }
++
++      // Check disk space before installing (minimum 5 GB)
++      const MINIMUM_DISK_BYTES = 5 * 1024 * 1024 * 1024
+       const disk = await window.electronAPI.getDiskSpace()
+-      if (disk?.free >= 0 && disk.free < 5 * 1024 * 1024 * 1024) {
++      if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
+         const availableGB = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
+-        throw new Error(
+-          $i18n.t('error.diskSpaceDetail', { available: availableGB })
+-        )
+-      }
+-      if (!(await window.electronAPI.getPythonStatus())) {
+-        if (!(await window.electronAPI.installPython()))
+-          throw new Error($i18n.t('error.pythonInstallFailed'))
+-      }
+-      if (!(await window.electronAPI.installPackage()))
+-        throw new Error($i18n.t('error.installFailedGeneric'))
+-      localInstalled = true
+-      if (options?.installLlamaCpp) await window.electronAPI.startLlamaCpp()
++        throw new Error($i18n.t('error.diskSpaceDetail', { available: availableGB }))
++      }
++
++      // Ensure Python and uv are installed before attempting package install
++      const pythonReady = await window.electronAPI.getPythonStatus()
++      if (!pythonReady) {
++        const pythonOk = await window.electronAPI.installPython()
++        if (!pythonOk) throw new Error($i18n.t('error.pythonInstallFailed'))
++      }
++
++      const ok = await window.electronAPI.installPackage()
++      if (!ok) throw new Error($i18n.t('error.installFailedGeneric'))
++
++      // Start optional services after packages are installed to avoid
++      // concurrent uv installs fighting over the lockfile
++      if (options?.installOpenTerminal) {
++        await toggleOpenTerminal()
++      }
++      if (options?.installLlamaCpp) {
++        await toggleLlamaCpp()
++      }
++
+       if (options?.installOllama) await window.electronAPI.startOllama()
+       installStatus = $i18n.t('main.install.startingServer')
+-      if (!(await openWebUI()) && launchError) throw new Error(launchError)
+-      installPhase = 'idle'
++      await window.electronAPI.startServer()
++      await window.electronAPI.getServerInfo()
++
++      installStatus = $i18n.t('main.install.settingUpConnection')
++      await window.electronAPI.setDefaultConnection('local')
++      config.set(await window.electronAPI.getConfig())
++
++      // Now connect — the server is ready
+       installStatus = ''
+-    } catch (error) {
++      if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
++      installPhase = 'idle'
++    } catch (e: any) {
+       installPhase = 'error'
+-      installError = error instanceof Error ? error.message : $i18n.t('error.somethingWentWrong')
++      installError = e?.message || $i18n.t('error.somethingWentWrong')
+       toastVisible = true
+-      clearTimeout(toastTimeout)
+-      toastTimeout = setTimeout(() => {
+-        toastVisible = false
+-      }, 5000)
++      if (toastTimeout) clearTimeout(toastTimeout)
++      toastTimeout = setTimeout(() => { toastVisible = false }, 5000)
++    }
++  }
++
++  const addConnection = async () => {
++    if (!url.trim()) return
++    let u = url.trim()
++    if (!u.startsWith('http')) u = 'https://' + u
++    error = ''
++    try {
++      new URL(u)
++    } catch {
++      error = $i18n.t('setup.invalidUrl')
++      return
++    }
++    connecting = true
++    try {
++      const valid = await window.electronAPI.validateUrl(u)
++      if (!valid) {
++        error = $i18n.t('setup.couldNotReachServer')
++        connecting = false
++        return
++      }
++      await window.electronAPI.addConnection({
++        id: crypto.randomUUID(),
++        name: new URL(u).hostname,
++        type: 'remote',
++        url: u
++      })
++      config.set(await window.electronAPI.getConfig())
++      url = ''
++      error = ''
++      showAddConnectionModal = false
++      view = 'welcome'
++    } catch {
++      error = $i18n.t('setup.connectionFailed')
++    } finally {
++      connecting = false
+     }
+   }
+ 
++  let connectRequest = 0
++  const connect = async (id: string, toggle = true): Promise<boolean> => {
++    const request = ++connectRequest
++    if (toggle && activeConnectionId === id && view === 'connected') {
++      connectingId = ''
++      activeConnectionId = ''
++      view = 'welcome'
++      return true
++    }
++    connectingId = id
++    error = ''
++    try {
++      await window.electronAPI.setDefaultConnection(id)
++      const result = await window.electronAPI.connectTo(id)
++      if (request !== connectRequest) return false
++      if (!result?.url) throw new Error($i18n.t('error.serverStartFailed'))
++      openConnections.set(id, result.url)
++      openConnections = new Map(openConnections)
++      activeConnectionId = id
++      view = 'connected'
++      return true
++    } catch (failure) {
++      if (request === connectRequest) error = failure instanceof Error ? failure.message : String(failure)
++      return false
++    } finally {
++      if (request === connectRequest) connectingId = ''
++    }
++  }
++
++  const disconnect = () => {
++    connectRequest++
++    connectingId = ''
++    activeConnectionId = ''
++    view = 'welcome'
++  }
++
++  const remove = async (id: string) => {
++    await window.electronAPI.removeConnection(id)
++    config.set(await window.electronAPI.getConfig())
++    if (activeConnectionId === id) {
++      disconnect()
++    }
++    openConnections.delete(id)
++    openConnections = new Map(openConnections)
++  }
++
++  $effect(() => {
++    if (activeConnectionId === 'local') {
++      activeConnectionName = localConn?.name ?? 'Open WebUI'
++    } else {
++      const conn = ($connections ?? []).find((c) => c.id === activeConnectionId)
++      activeConnectionName = conn?.name ?? ''
++    }
++  })
++
++  const openGithub = () => {
++    settingsOpen = false
++    window.electronAPI?.openInBrowser?.('https://github.com/open-webui/desktop')
++  }
++
++  // ── Log panel PTY helpers ─────────────────────────────
++  const selectLog = (log: string) => terminalDock?.select(log === 'llama-server' ? 'llamacpp' : log as 'server' | 'open-terminal')
++
++  // ── Webview event delivery ─────────────────────────────
++  // Single path: all events from the main process flow through here.
++  // User queries are targeted; local credentials stay in the owned local view.
++  const sendToWebview = (event: any, connId?: string) => {
++    if (!isGuestPushType(event?.type)) return
++    if ((event.type === 'query' || event.type === 'call') && !connId) return
++    const container = document.querySelector('.content-webview-container')
++    if (!container) return
++    const webviews = connId
++      ? [container.querySelector(`webview[partition="persist:connection-${connId}"]`) as any].filter(Boolean)
++      : Array.from(container.querySelectorAll('webview'))
++    for (const wv of webviews as any[]) {
++      const localOnly = event.type === 'connections:terminal' || event.type === 'connections:openai'
++      if (localOnly && wv.getAttribute('partition') !== 'persist:connection-local') continue
++      const deliver = () => {
++        if (!canRelayDesktopEvent(event.type, wv.getURL(), localConn?.url, !!connId)) return false
++        wv.send('desktop:event', event)
++        return true
++      }
++      try { if (deliver()) continue } catch { /* Wait for the owned view. */ }
++      const onReady = () => {
++        wv.removeEventListener('dom-ready', onReady)
++        try { deliver() } catch { /* A closed view owns no delivery. */ }
++      }
++      wv.addEventListener('dom-ready', onReady)
++    }
++  }
++
++  // Listen for events from main process
+   onMount(() => {
+-    const unsubscribe = window.electronAPI.onData((event) => {
+-      if (['server:open', 'server:ready'].includes(event.type) && event.data?.url)
+-        serverUrl = event.data.url
+-      if (event.type === 'server:info' && ['stopped', 'failed'].includes(event.data?.status))
+-        serverUrl = ''
+-      if (event.type === 'ollama:info') ollamaInfo = event.data
+-      if (event.type === 'status:ollama-setup') ollamaSetupStatus = event.data ?? ''
+-      if (event.type === 'llamacpp:info') {
+-        llamaCppInfo = event.data
+-        llamaCppStatus = event.data.status
+-      }
+-      if (event.type === 'status:llamacpp-setup') llamaCppSetupStatus = event.data ?? ''
+-      if (event.type === 'status:install') installStatus = event.data ?? ''
+-      if (event.type === 'packages:changed') {
+-        localInstalled = !!event.data?.['open-webui']
+-        if (!localInstalled) serverUrl = ''
++    const unsubscribe = window.electronAPI.onData((data: any) => {
++      // ── Connection opened (startup, tray click) ───────
++      if (data.type === 'connection:open' && data.data?.url) {
++        const connId = data.data.connectionId ?? ''
++        const incomingUrl = data.data.url
++
++        if (!openConnections.has(connId)) {
++          openConnections.set(connId, incomingUrl)
++          openConnections = new Map(openConnections)
++        }
++
++        if (view !== 'connected') {
++          activeConnectionId = connId
++          if (installPhase !== 'working') view = 'connected'
++        }
++        return
+       }
++
++      // ── Spotlight / desktop query ─────────────────────
++      if (data.type === 'query' && (data.data?.query || data.data?.files?.length)) {
++        const connId = data.data.connectionId ?? ''
++        const query = data.data.query
++        const files = data.data.files
++        const baseUrl = data.data.url ?? ''
++
++        if (!openConnections.has(connId)) {
++          openConnections.set(connId, baseUrl)
++          openConnections = new Map(openConnections)
++        } else {
++        }
++        activeConnectionId = connId
++        if (installPhase !== 'working') view = 'connected'
++
++        // Targeted delivery — wait a frame for the webview DOM to exist
++        requestAnimationFrame(() => {
++          sendToWebview({ type: 'query', data: { query, files } }, connId)
++        })
++        return
++      }
++
++      // ── Call shortcut ─────────────────────────────────
++      if (data.type === 'call' && data.data?.connectionId) {
++        const connId = data.data.connectionId ?? ''
++        const baseUrl = data.data.url ?? ''
++
++        if (!openConnections.has(connId)) {
++          openConnections.set(connId, baseUrl)
++          openConnections = new Map(openConnections)
++        } else {
++        }
++        activeConnectionId = connId
++        if (installPhase !== 'working') view = 'connected'
++
++        // Targeted delivery — wait a frame for the webview DOM to exist
++        requestAnimationFrame(() => {
++          sendToWebview({ type: 'call' }, connId)
++        })
++        return
++      }
++
++      // ── Desktop-only state (not forwarded to webviews) ─
++      if (data.type === 'open-terminal:info') { terminalInfo = data.data; openTerminalStatus = data.data?.status; return }
++      if (data.type === 'ollama:info') { ollamaInfo = data.data; return }
++      if (data.type === 'status:ollama-setup') { ollamaSetupStatus = data.data ?? ''; return }
++      if (data.type === 'llamacpp:info') { llamaCppInfo = data.data; llamaCppStatus = data.data?.status; return }
++      if (data.type === 'status:open-terminal') { openTerminalStatus = data.data; return }
++      if (data.type === 'status:open-terminal-setup') { openTerminalSetupStatus = data.data ?? ''; return }
++      if (data.type === 'open-terminal:ready') { openTerminalStatus = 'started'; openTerminalSetupStatus = ''; return }
++      if (data.type === 'status:llamacpp') { llamaCppStatus = data.data; return }
++      if (data.type === 'status:llamacpp-setup') { llamaCppSetupStatus = data.data ?? ''; return }
++      if (data.type === 'llamacpp:ready') { llamaCppInfo = data.data; llamaCppStatus = 'started'; llamaCppSetupStatus = ''; return }
++      if (data.type === 'status:install') { installStatus = data.data ?? ''; return }
++      if (data.type === 'packages:changed') {
++        localInstalled = !!data.data?.['open-webui']
++        return
++      }
++      if (data.type === 'connections:changed') {
++        connections.set(data.data ?? [])
++        return
++      }
++
++      // ── Everything else → broadcast to all webviews ───
++      sendToWebview(data)
+     })
+-    let disposed = false
+-    Promise.all([
+-      window.electronAPI.getPackageVersion('open-webui'),
+-      window.electronAPI.getConfig()
+-    ]).then(([version, cfg]) => {
+-      if (disposed) return
+-      localInstalled = version !== null
+-      config.set(cfg)
+-      if (localInstalled && $config?.localServer?.enabled !== false) void openWebUI()
++
++    // Auto-connect to the default connection on startup so the webview
++    // is pre-loaded and ready for spotlight queries.
++    window.electronAPI.getConfig().then((cfg: any) => {
++      connections.set(cfg?.connections ?? [])
++      sidebarOpen = cfg?.showSidebar !== false
++      if (cfg?.defaultConnectionId && !activeConnectionId) {
++        connect(cfg.defaultConnectionId)
++      }
+     })
+-    window.electronAPI.getOllamaInfo().then((info) => { if (!disposed) ollamaInfo = info })
+-    window.electronAPI.getLlamaCppInfo().then((info) => {
+-      if (disposed) return
+-      llamaCppInfo = info
+-      llamaCppStatus = info?.status ?? null
++
++    // Check current Open Terminal state on mount
++    window.electronAPI.getOpenTerminalInfo().then((info: any) => {
++      terminalInfo = info
++      if (info?.status) {
++        openTerminalStatus = info.status
++      }
+     })
+-    return () => {
+-      disposed = true
+-      unsubscribe()
+-    }
++
++    // Check if Open Terminal package is installed
++    window.electronAPI.getOpenTerminalStatus().then((installed: boolean) => {
++      openTerminalInstalled = installed
++    })
++
++    // Check if Open WebUI package is installed
++    window.electronAPI.getPackageVersion('open-webui').then((v: string | null) => {
++      localInstalled = v !== null
++    })
++
++    window.electronAPI.getOllamaInfo().then((info) => { ollamaInfo = info })
++
++    // Check llama-server state on mount
++    window.electronAPI.getLlamaCppInfo().then((info: any) => {
++      if (info?.status) {
++        llamaCppStatus = info.status
++      }
++      if (info?.binaryPath || info?.status) {
++        llamaCppInfo = info
++      }
++    })
++    return () => { unsubscribe(); if (toastTimeout) clearTimeout(toastTimeout) }
+   })
+-  onDestroy(() => clearTimeout(toastTimeout))
++
++  const toggleOpenTerminal = async () => {
++    if (openTerminalStatus === 'starting') return
++    if (openTerminalStatus === 'started') {
++      openTerminalStatus = 'stopping'
++      await window.electronAPI.stopOpenTerminal()
++      openTerminalStatus = null
++      openTerminalSetupStatus = ''
++    } else {
++      openTerminalStatus = 'starting'
++      openTerminalSetupStatus = ''
++      const result = await window.electronAPI.startOpenTerminal()
++      if (result) {
++        openTerminalStatus = 'started'
++      } else {
++        openTerminalStatus = 'failed'
++      }
++      openTerminalSetupStatus = ''
++    }
++  }
++
++  const toggleLlamaCpp = async () => {
++    if (llamaCppStatus === 'starting' || llamaCppStatus === 'setting-up') return
++    if (llamaCppStatus === 'started') {
++      llamaCppStatus = 'stopping'
++      await window.electronAPI.stopLlamaCpp()
++      llamaCppStatus = null
++      llamaCppInfo = null
++    } else {
++      llamaCppStatus = 'starting'
++      const result = await window.electronAPI.startLlamaCpp()
++      if (result) {
++        llamaCppInfo = result
++        llamaCppStatus = 'started'
++      } else {
++        llamaCppStatus = 'failed'
++      }
++    }
++  }
+ </script>
+ 
+-<div
+-  class="h-full w-full flex flex-col bg-[#f5f5f7] dark:bg-[#0a0a0a] text-[#1d1d1f] dark:text-[#fafafa]"
+->
+-  <Content
+-    bind:this={content}
+-    bind:canRefresh
+-    {serverUrl}
+-    {connecting}
+-    {launchError}
+-    {localInstalled}
+-    {installPhase}
+-    {installError}
+-    {installStatus}
+-    {toastVisible}
+-    onStartInstall={startInstall}
+-    onOpenWebUI={() => openWebUI()}
+-    onOpenTerminal={() => terminalDock?.select('server')}
+-  />
++<!-- svelte-ignore a11y_click_events_have_key_events -->
++<!-- svelte-ignore a11y_no_static_element_interactions -->
++<div class="h-full w-full flex flex-col bg-[#f5f5f7] dark:bg-[#0a0a0a] text-[#1d1d1f] dark:text-[#fafafa]" in:fade={{ duration: 200 }}>
++  <div class="flex-1 min-h-0 flex">
++    {#if sidebarOpen}
++      <Sidebar
++        {activeConnectionId}
++        {connectingId}
++        {localConn}
++        {localInstalled}
++        {remoteConnections}
++        {serverStatus}
++        {serverReachable}
++        bind:settingsOpen
++        onConnect={connect}
++        onDisconnect={disconnect}
++        onAddView={() => { showAddConnectionModal = true }}
++        {onOpenSettings}
++        onRename={async (id, name) => {
++          await window.electronAPI.updateConnection(id, { name })
++        }}
++        onRemove={remove}
++        {openGithub}
++      />
++    {/if}
+ 
+-  <TerminalDock
+-    bind:this={terminalDock}
+-    {onOpenSettings}
+-    onRefresh={() => content?.refresh()}
+-    canRefresh={canRefresh && !connecting}
++    <Content bind:this={content} bind:canRefresh
++      {sidebarOpen}
++      {view}
++      {activeConnectionId}
++      {connectingId}
++      {openConnections}
++      {localConn}
++      {localInstalled}
++      {remoteConnections}
++      {installPhase}
++      {installError}
++      {installStatus}
++      {toastVisible}
++      bind:url
++      bind:connecting
++      bind:error
++      bind:showAddConnectionModal
++      onStartInstall={startInstall}
++      onAddConnection={addConnection}
++      onSetView={(v) => { if (v === 'settings') onOpenSettings(); else view = v }}
++      onOpenWebUI={(id) => { void connect(id, false) }}
++      onOpenTerminal={() => selectLog('server')}
++    />
++  </div>
++
++  <TerminalDock bind:this={terminalDock} {onOpenSettings} {sidebarOpen}
++    onToggleSidebar={() => {
++      sidebarOpen = !sidebarOpen
++      void window.electronAPI.setConfig({ showSidebar: sidebarOpen })
++    }}
++    onRefresh={() => content?.refresh()} {canRefresh}
+     services={[
+-      ...(localInstalled || (serverStatus && serverStatus !== 'stopped')
+-        ? [
+-            {
+-              id: 'server' as const,
+-              label: $i18n.t('statusBar.server'),
+-              status: serverStatus,
+-              pid: $serverInfo?.pid,
+-              browserUrl: $serverInfo?.reachable ? $serverInfo.url : undefined,
+-              detail: $serverInfo?.error || (serverStatus === 'starting' ? installStatus : ''),
+-              onStart: async () => {
+-                if (!(await openWebUI()) && launchError) throw new Error(launchError)
+-              },
+-              runningAction: 'restart' as const,
+-              onRunningAction: async () => {
+-                if (!(await openWebUI(true)))
+-                  throw new Error(launchError || $i18n.t('error.serverRestartFailed'))
+-              }
+-            }
+-          ]
+-        : []),
+-      ...(llamaCppInfo?.binaryPath || (llamaCppStatus && llamaCppStatus !== 'stopped')
+-        ? [
+-            {
+-              id: 'llamacpp' as const,
+-              label: $i18n.t('sidebar.llamaCpp'),
+-              status: llamaCppStatus,
+-              pid: llamaCppInfo?.pid,
+-              detail:
+-                llamaCppInfo?.error || (llamaCppStatus === 'starting' ? llamaCppSetupStatus : ''),
+-              onStart: () => window.electronAPI.startLlamaCpp(),
+-              runningAction: 'stop' as const,
+-              onRunningAction: () => window.electronAPI.stopLlamaCpp()
+-            }
+-          ]
+-        : []),
++      ...(localInstalled || (serverStatus && serverStatus !== 'stopped') ? [{
++        id: 'server' as const, label: $i18n.t('statusBar.server'), status: serverStatus,
++        pid: $serverInfo?.pid, browserUrl: $serverInfo?.reachable ? $serverInfo.url : undefined,
++        detail: $serverInfo?.error || installStatus,
++        runningAction: $config?.localServer?.managedBackend ? 'reconnect' as const : 'restart' as const,
++        onStart: async () => {
++          if (!localInstalled) { await startInstall(); return }
++          if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
++        },
++        onRunningAction: async () => {
++          if (!await window.electronAPI.restartServer()) throw new Error($i18n.t('error.serverRestartFailed'))
++          if (!await connect('local', false)) throw new Error(error || $i18n.t('error.serverStartFailed'))
++        }
++      }] : []),
++      ...(openTerminalInstalled || (openTerminalStatus && openTerminalStatus !== 'stopped') ? [{
++        id: 'open-terminal' as const, label: $i18n.t('sidebar.openTerminal'), status: openTerminalStatus,
++        pid: terminalInfo?.pid, detail: terminalInfo?.error || openTerminalSetupStatus,
++        runningAction: $config?.localServer?.managedBackend ? 'reconnect' as const : 'stop' as const,
++        onStart: async () => {
++          const result = await window.electronAPI.startOpenTerminal()
++          if (!result) throw new Error($i18n.t('error.terminalStartFailed'))
++        },
++        onRunningAction: async () => {
++          await window.electronAPI.stopOpenTerminal()
++          if ($config?.localServer?.managedBackend && !await window.electronAPI.startOpenTerminal()) {
++            throw new Error($i18n.t('error.terminalStartFailed'))
++          }
++        }
++      }] : []),
++      ...(llamaCppInfo?.binaryPath || (llamaCppStatus && llamaCppStatus !== 'stopped') ? [{
++        id: 'llamacpp' as const, label: $i18n.t('sidebar.llamaCpp'), status: llamaCppStatus,
++        pid: llamaCppInfo?.pid, detail: llamaCppSetupStatus,
++        runningAction: 'stop' as const,
++        onStart: async () => { if (!await window.electronAPI.startLlamaCpp()) throw new Error($i18n.t('error.serverStartFailed')) },
++        onRunningAction: () => window.electronAPI.stopLlamaCpp()
++      }] : []),
+       ...(ollamaInfo?.binaryPath || (ollamaInfo?.status && ollamaInfo.status !== 'stopped')
+         ? [{
+             id: 'ollama' as const,
+diff --git a/src/renderer/src/lib/components/Main/Connections/AddConnectionModal.svelte b/src/renderer/src/lib/components/Main/Connections/AddConnectionModal.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..15d4630630ffe3888e98a2b36e47fecf1045ab0e
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Connections/AddConnectionModal.svelte
+@@ -0,0 +1,114 @@
++<script lang="ts">
++  import { fade, scale } from 'svelte/transition'
++  import i18n from '../../../i18n'
++
++  interface Props {
++    url: string
++    connecting: boolean
++    error: string
++    onConnect: () => void
++    onCancel: () => void
++  }
++
++  let {
++    url = $bindable(''),
++    connecting = $bindable(false),
++    error = $bindable(''),
++    onConnect,
++    onCancel
++  }: Props = $props()
++</script>
++
++<!-- svelte-ignore a11y_click_events_have_key_events -->
++<!-- svelte-ignore a11y_no_static_element_interactions -->
++<div
++  class="fixed inset-0 z-[100] flex items-center justify-center"
++  transition:fade={{ duration: 150 }}
++  onmousedown={onCancel}
++>
++  <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
++
++  <div
++    class="relative mx-4 w-full max-w-lg overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-gray-950"
++    transition:scale={{ start: 0.97, duration: 180 }}
++    onmousedown={(e) => e.stopPropagation()}
++  >
++    <!-- Visual header -->
++    <div
++      class="relative flex h-36 items-center justify-center overflow-hidden bg-gradient-to-br from-gray-900 via-gray-800 to-black dark:from-white dark:via-gray-100 dark:to-gray-200"
++    >
++      <div
++        class="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent"
++      ></div>
++      <div class="relative z-10 text-center">
++        <div class="mb-2.5 flex justify-center">
++          <div class="rounded-full bg-white/10 p-3 dark:bg-black/10">
++            <svg
++              class="w-6 h-6 text-white dark:text-gray-900"
++              fill="none"
++              viewBox="0 0 24 24"
++              stroke="currentColor"
++              stroke-width="1.5"
++            >
++              <path
++                stroke-linecap="round"
++                stroke-linejoin="round"
++                d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5a17.92 17.92 0 01-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"
++              />
++            </svg>
++          </div>
++        </div>
++        <h2 class="text-lg font-semibold tracking-tight text-white dark:text-gray-900">
++          {$i18n.t('setup.newConnection')}
++        </h2>
++        <p class="mt-1 text-xs text-white/60 dark:text-gray-900/50">
++          {$i18n.t('setup.newConnectionDesc')}
++        </p>
++      </div>
++    </div>
++
++    <!-- Body -->
++    <div class="px-6 py-5">
++      <label class="block text-[11px] text-gray-400 dark:text-gray-500"
++        >{$i18n.t('setup.connectionManager.serverUrl')}</label
++      >
++      <input
++        type="text"
++        bind:value={url}
++        placeholder="https://"
++        class="w-full py-2 text-[14px] text-[#1d1d1f] dark:text-[#fafafa] placeholder:opacity-20 outline-none bg-transparent border-none border-b border-black/[0.08] dark:border-white/[0.08]"
++        onkeydown={(e) => e.key === 'Enter' && onConnect()}
++      />
++
++      {#if error}
++        <p class="mt-2 text-[11px] text-red-400">{error}</p>
++      {/if}
++    </div>
++
++    <!-- Footer -->
++    <div class="px-5 pb-5 flex flex-col gap-2">
++      <button
++        class="w-full rounded-xl bg-gray-900 dark:bg-white px-4 py-2.5 text-sm font-medium text-white dark:text-gray-900 transition-all duration-200 hover:bg-gray-800 dark:hover:bg-gray-100 active:scale-[0.98] border-none cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:active:scale-100"
++        onclick={onConnect}
++        disabled={connecting || !url.trim()}
++      >
++        {#if connecting}
++          <span class="inline-flex items-center gap-2">
++            <span
++              class="w-3.5 h-3.5 rounded-full border-2 border-white/30 dark:border-black/30 border-t-white dark:border-t-black animate-spin inline-block"
++            ></span>
++            {$i18n.t('common.connecting')}
++          </span>
++        {:else}
++          {$i18n.t('common.connect')}
++        {/if}
++      </button>
++      <button
++        class="w-full rounded-xl px-4 py-2 text-sm text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition bg-transparent border-none cursor-pointer"
++        onclick={onCancel}
++      >
++        {$i18n.t('common.cancel')}
++      </button>
++    </div>
++  </div>
++</div>
+diff --git a/src/renderer/src/lib/components/Main/Connections/GetStartedModal.svelte b/src/renderer/src/lib/components/Main/Connections/GetStartedModal.svelte
+index b585ebcbd44403d416a0666b6238ab704071596f..22272ef0204f1ffb8024b3b35db99de973a5ef9e 100644
+--- a/src/renderer/src/lib/components/Main/Connections/GetStartedModal.svelte
++++ b/src/renderer/src/lib/components/Main/Connections/GetStartedModal.svelte
+@@ -7,12 +7,13 @@
+   import Switch from '../../common/Switch.svelte'
+ 
+   interface Props {
+-    onContinue: (options: { installLlamaCpp: boolean; installOllama: boolean; installDir: string }) => void
++    onContinue: (options: { installOpenTerminal: boolean; installLlamaCpp: boolean; installOllama: boolean; installDir: string }) => void
+     onCancel: () => void
+   }
+ 
+   let { onContinue, onCancel }: Props = $props()
+ 
++  let installOpenTerminal = $state(false)
+   let installOllama = $state(false)
+   let installLlamaCpp = $state(false)
+   let installDir = $state('')
+@@ -82,6 +83,12 @@
+         />
+       </div>
+       <div class="py-3.5 flex items-center justify-between gap-4">
++        <div><div class="text-sm">{$i18n.t('main.getStarted.openTerminal')}</div>
++          <div class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">{$i18n.t('main.getStarted.openTerminalDesc')}</div></div>
++        <Switch checked={installOpenTerminal} label={$i18n.t('main.getStarted.openTerminal')}
++          onchange={(value) => { installOpenTerminal = value }} />
++      </div>
++      <div class="flex items-center justify-between gap-4">
+         <div>
+           <div class="text-[13px] font-medium text-gray-700 dark:text-gray-300">Ollama</div>
+           <div class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">{$i18n.t('settings.ollama.description')}</div>
+@@ -126,7 +133,7 @@
+     <div class="px-5 pb-5 pt-1 flex flex-col gap-2">
+       <button
+         class="w-full rounded-xl bg-gray-900 dark:bg-white px-4 py-2.5 text-sm font-medium text-white dark:text-gray-900 transition-all duration-200 hover:bg-gray-800 dark:hover:bg-gray-100 active:scale-[0.98] border-none cursor-pointer"
+-        onclick={() => onContinue({ installLlamaCpp, installOllama, installDir })}
++        onclick={() => onContinue({ installOpenTerminal, installLlamaCpp, installOllama, installDir })}
+       >
+         {$i18n.t('main.getStarted.continue')}
+       </button>
+diff --git a/src/renderer/src/lib/components/Main/Connections/Sidebar.svelte b/src/renderer/src/lib/components/Main/Connections/Sidebar.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cd31be992a92dd9fb75782b2d435a31529a8d89
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Connections/Sidebar.svelte
+@@ -0,0 +1,490 @@
++<script lang="ts">
++  import { fly, fade } from 'svelte/transition'
++  import { appInfo } from '../../../stores'
++  import i18n from '../../../i18n'
++
++  interface Props {
++    activeConnectionId: string
++    connectingId: string
++    localConn: any
++    localInstalled: boolean
++    remoteConnections: any[]
++    serverStatus: string | undefined
++    serverReachable: boolean | undefined
++    settingsOpen: boolean
++    onConnect: (id: string) => void
++    onDisconnect: () => void
++    onAddView: () => void
++    onOpenSettings: () => void
++    onRename: (id: string, name: string) => void
++    onRemove: (id: string) => void
++    openGithub: () => void
++  }
++
++  let {
++    activeConnectionId,
++    connectingId,
++    localConn,
++    localInstalled,
++    remoteConnections,
++    serverStatus,
++    serverReachable,
++    settingsOpen = $bindable(false),
++    onConnect,
++    onAddView,
++    onOpenSettings,
++    onRename,
++    onRemove,
++    openGithub
++  }: Props = $props()
++
++  // Inline rename state
++  let editingId = $state<string | null>(null)
++  let editValue = $state('')
++  let menuOpenId = $state<string | null>(null)
++
++  const startRename = (id: string, currentName: string) => {
++    editingId = id
++    editValue = currentName
++  }
++
++  const commitRename = () => {
++    if (editingId && editValue.trim()) {
++      onRename(editingId, editValue.trim())
++    }
++    editingId = null
++    editValue = ''
++  }
++
++  const cancelRename = () => {
++    editingId = null
++    editValue = ''
++  }
++</script>
++
++<div
++  class="w-[200px] shrink-0 flex flex-col bg-[#f5f5f7] dark:bg-[#0a0a0a] relative"
++  in:fly={{ x: -200, duration: 200 }}
++>
++  <!-- Connections header -->
++  <div class="flex items-center justify-between px-4 pt-2 pb-1.5">
++    <span class="text-[10px] tracking-wider uppercase opacity-60"
++      >{$i18n.t('sidebar.connections')}</span
++    >
++    <button
++      class="opacity-25 hover:opacity-60 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] leading-none"
++      onclick={() => {
++        onAddView()
++      }}
++      title={$i18n.t('sidebar.addConnection')}
++    >
++      <svg
++        class="w-[14px] h-[14px]"
++        fill="none"
++        viewBox="0 0 24 24"
++        stroke="currentColor"
++        stroke-width="1.5"
++      >
++        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
++      </svg>
++    </button>
++  </div>
++
++  <!-- Connection list -->
++  <div class="flex-1 min-h-0 overflow-y-auto px-2">
++    <!-- Pinned: Open WebUI (local) -->
++    {#if localConn && localInstalled}
++      <div
++        class="w-full px-2.5 py-1.5 rounded-xl group flex items-center gap-2 transition-colors cursor-pointer {activeConnectionId === localConn.id
++          ? 'bg-black/[0.08] dark:bg-white/[0.08]'
++          : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
++        role="button"
++        tabindex="0"
++        onclick={() => onConnect(localConn.id)}
++        onkeydown={(e) => e.key === 'Enter' && onConnect(localConn.id)}
++      >
++        {#if connectingId === localConn.id || serverStatus === 'starting' || (serverStatus === 'running' && !serverReachable)}
++          <div class="w-[14px] h-[14px] shrink-0 flex items-center justify-center">
++            <div
++              class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"
++            ></div>
++          </div>
++        {:else if serverReachable}
++          <div class="w-[14px] h-[14px] shrink-0 flex items-center justify-center">
++            <div
++              class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]"
++            ></div>
++          </div>
++        {:else}
++          <div class="w-[14px] h-[14px] shrink-0 flex items-center justify-center">
++            <div class="w-2 h-2 rounded-full bg-black/10 dark:bg-white/15"></div>
++          </div>
++        {/if}
++        {#if editingId === localConn.id}
++          <!-- svelte-ignore a11y_autofocus -->
++          <input
++            type="text"
++            class="text-[12px] bg-transparent text-[#1d1d1f] dark:text-[#fafafa] px-0 py-0 border-none outline-none rounded-md flex-1 min-w-0"
++            bind:value={editValue}
++            autofocus
++            onfocus={(e) => e.currentTarget.select()}
++            onclick={(e) => e.stopPropagation()}
++            onkeydown={(e) => {
++              e.stopPropagation()
++              if (e.key === 'Enter') commitRename()
++              if (e.key === 'Escape') cancelRename()
++            }}
++            onblur={commitRename}
++          />
++        {:else}
++          <span
++            class="text-[12px] {activeConnectionId === localConn.id
++              ? 'font-medium opacity-100'
++              : 'opacity-70'} transition-opacity truncate flex-1 min-w-0"
++            >{localConn.name ?? 'Open WebUI'}</span
++          >
++        {/if}
++
++        <div class="ml-auto relative shrink-0">
++          <button
++            class="opacity-20 hover:opacity-70 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0.5 leading-none"
++            onclick={(e) => {
++              e.stopPropagation()
++              menuOpenId = menuOpenId === 'local' ? null : 'local'
++            }}
++          >
++            <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
++              <path
++                d="M6 10a2 2 0 11-4 0 2 2 0 014 0zM12 10a2 2 0 11-4 0 2 2 0 014 0zM18 10a2 2 0 11-4 0 2 2 0 014 0z"
++              />
++            </svg>
++          </button>
++
++          {#if menuOpenId === 'local'}
++            <div
++              class="fixed inset-0 z-40"
++              onclick={(e) => {
++                e.stopPropagation()
++                menuOpenId = null
++              }}
++            ></div>
++            <div
++              class="absolute right-0 top-6 z-50 w-[160px] bg-white dark:bg-[#1a1a1a]/90 backdrop-blur-xl border border-black/[0.08] dark:border-white/[0.08] rounded-2xl shadow-2xl py-0.5 overflow-hidden"
++              in:fly={{ y: -4, duration: 150 }}
++              out:fade={{ duration: 100 }}
++            >
++              <div class="py-1 px-1.5">
++                <button
++                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++                  onclick={(e) => {
++                    e.stopPropagation()
++                    menuOpenId = null
++                    startRename(localConn.id, localConn.name ?? 'Open WebUI')
++                  }}
++                >
++                  <svg
++                    class="w-[14px] h-[14px] shrink-0"
++                    fill="none"
++                    viewBox="0 0 24 24"
++                    stroke="currentColor"
++                    stroke-width="1.5"
++                  >
++                    <path
++                      stroke-linecap="round"
++                      stroke-linejoin="round"
++                      d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z"
++                    />
++                  </svg>
++                  {$i18n.t('common.rename')}
++                </button>
++                <button
++                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++                  onclick={(e) => {
++                    e.stopPropagation()
++                    menuOpenId = null
++                    window.electronAPI?.openInBrowser?.(localConn.url)
++                  }}
++                >
++                  <svg
++                    class="w-[14px] h-[14px] shrink-0"
++                    fill="none"
++                    viewBox="0 0 24 24"
++                    stroke="currentColor"
++                    stroke-width="1.5"
++                  >
++                    <path
++                      stroke-linecap="round"
++                      stroke-linejoin="round"
++                      d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
++                    />
++                  </svg>
++                  {$i18n.t('sidebar.openInBrowser')}
++                </button>
++              </div>
++            </div>
++          {/if}
++        </div>
++      </div>
++    {/if}
++
++    {#if localConn && localInstalled && remoteConnections.length > 0}
++      <div class="my-1 mx-2 border-t border-black/[0.04] dark:border-white/[0.04]"></div>
++    {/if}
++
++    {#each remoteConnections as conn (conn.id)}
++      <div
++        class="w-full px-2.5 py-1.5 rounded-xl group flex items-center gap-2 transition-colors cursor-pointer {activeConnectionId ===
++        conn.id
++          ? 'bg-black/[0.08] dark:bg-white/[0.08]'
++          : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
++        role="button"
++        tabindex="0"
++        onclick={() => editingId !== conn.id && onConnect(conn.id)}
++        onkeydown={(e) => e.key === 'Enter' && editingId !== conn.id && onConnect(conn.id)}
++      >
++        {#if connectingId === conn.id}
++          <div class="w-[14px] h-[14px] shrink-0 flex items-center justify-center">
++            <div
++              class="w-2.5 h-2.5 rounded-full border-[1.5px] border-black/20 dark:border-white/30 border-t-transparent animate-spin"
++            ></div>
++          </div>
++        {:else}
++          <svg
++            class="w-[14px] h-[14px] shrink-0 opacity-30"
++            fill="none"
++            viewBox="0 0 24 24"
++            stroke="currentColor"
++            stroke-width="1.5"
++          >
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5a17.92 17.92 0 01-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"
++            />
++          </svg>
++        {/if}
++
++        {#if editingId === conn.id}
++          <!-- svelte-ignore a11y_autofocus -->
++          <input
++            type="text"
++            class="text-[12px] bg-transparent text-[#1d1d1f] dark:text-[#fafafa] px-0 py-0 border-none outline-none rounded-md flex-1 min-w-0"
++            bind:value={editValue}
++            autofocus
++            onfocus={(e) => e.currentTarget.select()}
++            onclick={(e) => e.stopPropagation()}
++            onkeydown={(e) => {
++              e.stopPropagation()
++              if (e.key === 'Enter') commitRename()
++              if (e.key === 'Escape') cancelRename()
++            }}
++            onblur={commitRename}
++          />
++        {:else}
++          <span
++            class="text-[12px] {activeConnectionId === conn.id
++              ? 'font-medium opacity-100'
++              : 'opacity-70'} transition-opacity truncate flex-1 min-w-0">{conn.name}</span
++          >
++        {/if}
++
++        <!-- Three-dots menu -->
++        <div class="ml-auto relative shrink-0">
++          <button
++            class="opacity-20 hover:opacity-70 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] p-0.5 leading-none"
++            onclick={(e) => {
++              e.stopPropagation()
++              menuOpenId = menuOpenId === conn.id ? null : conn.id
++            }}
++          >
++            <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
++              <path
++                d="M6 10a2 2 0 11-4 0 2 2 0 014 0zM12 10a2 2 0 11-4 0 2 2 0 014 0zM18 10a2 2 0 11-4 0 2 2 0 014 0z"
++              />
++            </svg>
++          </button>
++
++          {#if menuOpenId === conn.id}
++            <div
++              class="fixed inset-0 z-40"
++              onclick={(e) => {
++                e.stopPropagation()
++                menuOpenId = null
++              }}
++            ></div>
++            <div
++              class="absolute right-0 top-6 z-50 w-[160px] bg-white dark:bg-[#1a1a1a]/90 backdrop-blur-xl border border-black/[0.08] dark:border-white/[0.08] rounded-2xl shadow-2xl py-0.5 overflow-hidden"
++              in:fly={{ y: -4, duration: 150 }}
++              out:fade={{ duration: 100 }}
++            >
++              <div class="py-1 px-1.5">
++                <button
++                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++                  onclick={(e) => {
++                    e.stopPropagation()
++                    menuOpenId = null
++                    startRename(conn.id, conn.name)
++                  }}
++                >
++                  <svg
++                    class="w-[14px] h-[14px] shrink-0"
++                    fill="none"
++                    viewBox="0 0 24 24"
++                    stroke="currentColor"
++                    stroke-width="1.5"
++                  >
++                    <path
++                      stroke-linecap="round"
++                      stroke-linejoin="round"
++                      d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z"
++                    />
++                  </svg>
++                  {$i18n.t('common.rename')}
++                </button>
++                <button
++                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++                  onclick={(e) => {
++                    e.stopPropagation()
++                    menuOpenId = null
++                    window.electronAPI?.openInBrowser?.(conn.url)
++                  }}
++                >
++                  <svg
++                    class="w-[14px] h-[14px] shrink-0"
++                    fill="none"
++                    viewBox="0 0 24 24"
++                    stroke="currentColor"
++                    stroke-width="1.5"
++                  >
++                    <path
++                      stroke-linecap="round"
++                      stroke-linejoin="round"
++                      d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
++                    />
++                  </svg>
++                  {$i18n.t('sidebar.openInBrowser')}
++                </button>
++              </div>
++              <div class="mx-3 border-t border-black/[0.06] dark:border-white/[0.06]"></div>
++              <div class="py-1 px-1.5">
++                <button
++                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-red-500/10 transition bg-transparent border-none text-red-400 rounded-xl"
++                  onclick={(e) => {
++                    e.stopPropagation()
++                    menuOpenId = null
++                    onRemove(conn.id)
++                  }}
++                >
++                  <svg
++                    class="w-[14px] h-[14px] shrink-0"
++                    fill="none"
++                    viewBox="0 0 24 24"
++                    stroke="currentColor"
++                    stroke-width="1.5"
++                  >
++                    <path
++                      stroke-linecap="round"
++                      stroke-linejoin="round"
++                      d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
++                    />
++                  </svg>
++                  {$i18n.t('common.delete')}
++                </button>
++              </div>
++            </div>
++          {/if}
++        </div>
++      </div>
++    {/each}
++  </div>
++
++  <!-- Settings popover -->
++  {#if settingsOpen}
++    <div class="fixed inset-0 z-40" onclick={() => (settingsOpen = false)}></div>
++
++    <div
++      class="absolute bottom-12 left-2 right-2 z-50 bg-white dark:bg-[#1a1a1a]/90 backdrop-blur-xl border border-black/[0.08] dark:border-white/[0.08] rounded-2xl shadow-lg py-0.5 overflow-hidden"
++      in:fly={{ y: 8, duration: 150 }}
++      out:fade={{ duration: 100 }}
++    >
++      <div class="px-3.5 py-2.5 border-b border-black/[0.06] dark:border-white/[0.06]">
++        <div class="text-[11px] opacity-40">{$i18n.t('app.desktop')}</div>
++        <div class="text-[10px] opacity-20 mt-0.5">{$appInfo?.version ?? ''}</div>
++      </div>
++
++      <div class="py-1 px-1.5">
++        <button
++          class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/4 dark:hover:bg-white/4 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++          onclick={() => {
++            settingsOpen = false
++            onOpenSettings()
++          }}
++        >
++          <svg
++            class="w-[14px] h-[14px] shrink-0"
++            fill="none"
++            viewBox="0 0 24 24"
++            stroke="currentColor"
++            stroke-width="1.5"
++          >
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z"
++            />
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
++            />
++          </svg>
++          {$i18n.t('sidebar.settings')}
++        </button>
++
++        <button
++          class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12px] opacity-50 hover:opacity-90 hover:bg-black/4 dark:hover:bg-white/4 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-xl"
++          onclick={openGithub}
++        >
++          <svg
++            class="w-[14px] h-[14px] shrink-0"
++            fill="none"
++            viewBox="0 0 24 24"
++            stroke="currentColor"
++            stroke-width="1.5"
++          >
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
++            />
++          </svg>
++          {$i18n.t('sidebar.github')}
++        </button>
++      </div>
++    </div>
++  {/if}
++
++  <!-- Settings button (bottom) -->
++  <div class="px-2 pb-3">
++    <button
++      class="w-full flex items-center gap-2 px-2 py-[6px] rounded-xl text-[12px] opacity-80 hover:opacity-70 hover:bg-black/4 dark:hover:bg-white/4 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] text-left"
++      onclick={() => (settingsOpen = !settingsOpen)}
++    >
++      <svg
++        class="w-[14px] h-[14px] shrink-0"
++        fill="none"
++        viewBox="0 0 24 24"
++        stroke="currentColor"
++        stroke-width="1.5"
++      >
++        <path
++          stroke-linecap="round"
++          stroke-linejoin="round"
++          d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z"
++        />
++        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
++      </svg>
++      {$i18n.t('sidebar.settings')}
++    </button>
++  </div>
++</div>
+diff --git a/src/renderer/src/lib/components/Main/Settings.svelte b/src/renderer/src/lib/components/Main/Settings.svelte
+index 4fbdf0f6330925f7764952eb1e874ae01dc20098..d6eefadd7f4af453e4dd3d635931de386aa58496 100644
+--- a/src/renderer/src/lib/components/Main/Settings.svelte
++++ b/src/renderer/src/lib/components/Main/Settings.svelte
+@@ -11,6 +11,8 @@
+   import i18n from '../../i18n'
+ 
+   import General from './Settings/General.svelte'
++  import Connections from './Settings/Connections.svelte'
++  import OpenTerminal from './Settings/OpenTerminal.svelte'
+   import OpenWebUI from './Settings/OpenWebUI.svelte'
+   import InferenceRuntime from './Settings/InferenceRuntime.svelte'
+   import Ollama from './Settings/Ollama.svelte'
+@@ -29,6 +31,8 @@
+   const tabs = [
+     { id: 'general', icon: SettingsIcon, group: 'basics' },
+     { id: 'openwebui', icon: GlobeIcon, group: 'services' },
++    { id: 'connections', icon: GlobeIcon, group: 'services' },
++    { id: 'openTerminal', icon: CpuIcon, group: 'services' },
+     { id: 'inference', icon: CpuIcon, group: 'services' },
+     { id: 'models', icon: DatabaseIcon, group: 'data' },
+     { id: 'about', icon: InfoCircleIcon, group: null }
+@@ -173,6 +177,10 @@
+           <General />
+         {:else if settingsTab === 'openwebui'}
+           <OpenWebUI />
++        {:else if settingsTab === 'connections'}
++          <Connections />
++        {:else if settingsTab === 'openTerminal'}
++          <OpenTerminal />
+         {:else if settingsTab === 'inference'}
+           <div id="inference-runtime-content">
+             {#if runtime === 'llamacpp'}
+diff --git a/src/renderer/src/lib/components/Main/Settings/Connections.svelte b/src/renderer/src/lib/components/Main/Settings/Connections.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..b53ffb3fc78676d512402015807d9e271b2d021a
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Settings/Connections.svelte
+@@ -0,0 +1,53 @@
++<script lang="ts">
++  import { connections, config } from '../../../stores'
++  import i18n from '../../../i18n'
++
++  const remove = async (id: string) => {
++    await window.electronAPI.removeConnection(id)
++    config.set(await window.electronAPI.getConfig())
++  }
++</script>
++
++<div class="flex flex-col divide-y divide-white/[0.04]">
++  {#each $connections as conn}
++    <div class="py-3 flex items-center justify-between">
++      <div class="flex items-center gap-2.5 min-w-0">
++        <svg
++          class="w-[14px] h-[14px] shrink-0 opacity-30"
++          fill="none"
++          viewBox="0 0 24 24"
++          stroke="currentColor"
++          stroke-width="1.5"
++        >
++          {#if conn.type === 'local'}
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25A2.25 2.25 0 015.25 3h13.5A2.25 2.25 0 0121 5.25z"
++            />
++          {:else}
++            <path
++              stroke-linecap="round"
++              stroke-linejoin="round"
++              d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5a17.92 17.92 0 01-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"
++            />
++          {/if}
++        </svg>
++        <div class="min-w-0">
++          <div class="text-[13px] opacity-70 truncate">{conn.name}</div>
++          <div class="text-[11px] opacity-25 truncate mt-0.5">{conn.url}</div>
++        </div>
++      </div>
++      <button
++        class="text-[11px] opacity-30 hover:opacity-60 px-2 py-1 bg-transparent transition border-none text-[#1d1d1f] dark:text-[#fafafa] shrink-0"
++        onclick={() => remove(conn.id)}
++      >
++        {$i18n.t('common.remove')}
++      </button>
++    </div>
++  {/each}
++
++  {#if ($connections ?? []).length === 0}
++    <div class="py-6 text-[12px] opacity-20 text-center">{$i18n.t('settings.connections.noConnections')}</div>
++  {/if}
++</div>
+diff --git a/src/renderer/src/lib/components/Main/Settings/General.svelte b/src/renderer/src/lib/components/Main/Settings/General.svelte
+index 7292be67fd70606af71599deb5abd1c92143ce79..8cd46f7d3bd3f36739eed95354770e720192e667 100644
+--- a/src/renderer/src/lib/components/Main/Settings/General.svelte
++++ b/src/renderer/src/lib/components/Main/Settings/General.svelte
+@@ -7,6 +7,7 @@
+   import { appInfo, config } from '../../../stores'
+   import i18n, { getLanguages, changeLanguage } from '../../../i18n'
+   import Switch from '../../common/Switch.svelte'
++  import VoiceShortcuts from './VoiceShortcuts.svelte'
+ 
+   let launchAtLogin = $state(false)
+   let startMinimized = $state(false)
+@@ -23,7 +24,7 @@
+ 
+   // Language state
+   let languages = $state<{ code: string; title: string }[]>([])
+-  let selectedLanguage = $state('en-US')
++  let selectedLanguage = $state('ru-RU')
+ 
+   onMount(async () => {
+     launchAtLogin = await window.electronAPI.getLaunchAtLogin()
+@@ -42,7 +43,7 @@
+ 
+     // Load languages
+     languages = await getLanguages()
+-    selectedLanguage = cfg?.language ?? localStorage.getItem('locale') ?? 'en-US'
++    selectedLanguage = cfg?.language ?? localStorage.getItem('locale') ?? 'ru-RU'
+   })
+ 
+   const applyThemeClass = (t: string) => {
+@@ -407,6 +408,8 @@
+     </div>
+   </div>
+ 
++  <VoiceShortcuts />
++
+   <!-- Advanced (collapsed by default) -->
+   <div class="pt-1">
+     <button
+diff --git a/src/renderer/src/lib/components/Setup/ConnectionManager.svelte b/src/renderer/src/lib/components/Setup/ConnectionManager.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd5ad31be8fcbec888441bd5051dde6297902a30
+--- /dev/null
++++ b/src/renderer/src/lib/components/Setup/ConnectionManager.svelte
+@@ -0,0 +1,163 @@
++<script lang="ts">
++  import { fly, fade } from 'svelte/transition'
++  import { onMount } from 'svelte'
++  import { connections, config, appState, appInfo } from '../../stores'
++  import i18n from '../../i18n'
++
++  import logoImage from '../../assets/images/splash.png'
++
++  let view = $state('list') // list | add
++  let url = $state('')
++  let name = $state('')
++  let connecting = $state(false)
++  let error = $state('')
++  let visible = $state(false)
++
++  onMount(async () => {
++    connections.set(await window.electronAPI.getConnections())
++    config.set(await window.electronAPI.getConfig())
++    setTimeout(() => { visible = true }, 50)
++  })
++
++  const add = async () => {
++    if (!url.trim()) return
++    let u = url.trim()
++    if (!u.startsWith('http')) u = 'https://' + u
++    error = ''
++    connecting = true
++    try {
++      const valid = await window.electronAPI.validateUrl(u)
++      if (!valid) { error = $i18n.t('setup.connectionManager.unreachable'); connecting = false; return }
++      await window.electronAPI.addConnection({
++        id: crypto.randomUUID(),
++        name: name.trim() || new URL(u).hostname,
++        type: 'remote',
++        url: u
++      })
++      config.set(await window.electronAPI.getConfig())
++      url = ''; name = ''; view = 'list'
++    } catch { error = $i18n.t('setup.connectionManager.failed') }
++    finally { connecting = false }
++  }
++
++  const connect = (id: string) => window.electronAPI.connectTo(id)
++  const setDefault = async (id: string) => {
++    await window.electronAPI.setDefaultConnection(id)
++    config.set(await window.electronAPI.getConfig())
++  }
++  const remove = async (id: string) => {
++    await window.electronAPI.removeConnection(id)
++    config.set(await window.electronAPI.getConfig())
++    if (($connections ?? []).length === 0) appState.set('setup')
++  }
++</script>
++
++{#if visible}
++  <div class="h-full flex flex-col bg-[#f5f5f7] dark:bg-[#0a0a0a] text-[#1d1d1f] dark:text-[#fafafa]" in:fade={{ duration: 250 }}>
++    <!-- Header -->
++    <div class="flex items-center justify-between {$appInfo?.platform === 'darwin' ? 'pl-[76px]' : 'pl-5'} pr-5 pt-3 pb-2 drag-region">
++      <div class="text-[13px] opacity-50">{$i18n.t('setup.connectionManager.connections')}</div>
++      <img src={logoImage} class="w-5 h-5 rounded-full dark:invert opacity-40" alt="logo" />
++    </div>
++
++    <div class="mx-5 border-b border-black/[0.06] dark:border-white/[0.06]"></div>
++
++    <!-- Content -->
++    <div class="flex-1 min-h-0 overflow-y-auto px-5 py-3">
++      {#if view === 'list'}
++        <div class="flex flex-col">
++          {#each $connections as conn, i (conn.id)}
++            <div
++              class="w-full py-3 cursor-pointer group flex items-center gap-3 transition-opacity hover:opacity-100 opacity-70 {i > 0 ? 'border-t border-black/[0.04] dark:border-white/[0.04]' : ''}"
++              role="button"
++              tabindex="0"
++              onclick={() => connect(conn.id)}
++              onkeydown={(e) => e.key === 'Enter' && connect(conn.id)}
++              in:fly={{ y: 4, duration: 150, delay: i * 30 }}
++            >
++              <div class="w-[6px] h-[6px] rounded-full shrink-0 {conn.type === 'local' ? 'bg-green-400/70' : 'bg-black/8 dark:bg-white/10'}"></div>
++
++              <div class="flex-1 min-w-0">
++                <div class="flex items-center gap-2">
++                  <span class="text-[13px] truncate">{conn.name}</span>
++                  {#if $config?.defaultConnectionId === conn.id}
++                    <span class="text-[10px] opacity-30">{$i18n.t('common.default')}</span>
++                  {/if}
++                </div>
++                <span class="text-[11px] opacity-20 truncate block mt-px">{conn.url}</span>
++              </div>
++
++              <div class="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
++                {#if $config?.defaultConnectionId !== conn.id}
++                  <button
++                    class="p-1.5 opacity-20 hover:opacity-60 text-[10px] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++                    onclick={(e) => { e.stopPropagation(); setDefault(conn.id) }}
++                  >★</button>
++                {/if}
++                <button
++                  class="p-1.5 opacity-20 hover:text-red-400 hover:opacity-80 text-[10px] transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++                  onclick={(e) => { e.stopPropagation(); remove(conn.id) }}
++                >✕</button>
++              </div>
++            </div>
++          {:else}
++            <div class="flex-1 flex items-center justify-center py-16">
++              <span class="text-[13px] opacity-15">{$i18n.t('setup.connectionManager.noConnections')}</span>
++            </div>
++          {/each}
++        </div>
++
++        <!-- Add button -->
++        <button
++          class="mt-4 inline-flex items-center gap-2 text-[13px] opacity-40 hover:opacity-70 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++          onclick={() => (view = 'add')}
++        >
++          {$i18n.t('setup.connectionManager.addConnection')}
++        </button>
++
++      {:else if view === 'add'}
++        <div in:fade={{ duration: 150 }}>
++          <button
++            class="text-[12px] opacity-40 hover:opacity-70 transition mb-6 bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++            onclick={() => { view = 'list'; error = '' }}
++          >
++            {$i18n.t('common.back')}
++          </button>
++
++          <div class="text-2xl font-light tracking-tight mb-5">{$i18n.t('setup.connectionManager.addConnectionTitle')}</div>
++
++          <div class="flex flex-col gap-2.5">
++            <input
++              type="text"
++              bind:value={url}
++              placeholder={$i18n.t('setup.connectionManager.serverUrl')}
++              class="w-full px-4 py-2.5 bg-black/[0.04] dark:bg-white/[0.06] text-[13px] text-[#1d1d1f] dark:text-[#fafafa] placeholder:opacity-20 outline-none focus:bg-white/[0.1] transition no-drag border-none"
++              onkeydown={(e) => e.key === 'Enter' && add()}
++            />
++            <input
++              type="text"
++              bind:value={name}
++              placeholder={$i18n.t('setup.connectionManager.labelOptional')}
++              class="w-full px-4 py-2.5 bg-black/[0.04] dark:bg-white/[0.06] text-[13px] text-[#1d1d1f] dark:text-[#fafafa] placeholder:opacity-20 outline-none focus:bg-white/[0.1] transition no-drag border-none"
++            />
++            {#if error}
++              <span class="text-[11px] text-red-400 opacity-80">{error}</span>
++            {/if}
++            <button
++              class="w-fit mt-2 inline-flex items-center gap-2 bg-white px-8 py-2.5 text-black text-[13px] transition hover:bg-gray-100 disabled:opacity-30 border-none"
++              onclick={add}
++              disabled={connecting}
++            >
++              {connecting ? $i18n.t('setup.connectionManager.adding') : $i18n.t('setup.connectionManager.add')}
++              {#if !connecting}
++                <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++                  <path stroke-linecap="round" stroke-linejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" />
++                </svg>
++              {/if}
++            </button>
++          </div>
++        </div>
++      {/if}
++    </div>
++  </div>
++{/if}
+diff --git a/src/renderer/src/lib/components/Setup/LocalInstall.svelte b/src/renderer/src/lib/components/Setup/LocalInstall.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..c09cbac0ce52ae73c5fe0e10f505e297b0cfc07b
+--- /dev/null
++++ b/src/renderer/src/lib/components/Setup/LocalInstall.svelte
+@@ -0,0 +1,138 @@
++<script lang="ts">
++  import { fade } from 'svelte/transition'
++  import { onMount } from 'svelte'
++  import { config, serverInfo } from '../../stores'
++  import i18n from '../../i18n'
++
++  import logoImage from '../../assets/images/splash.png'
++
++  let { onBack, onComplete, autoStart = false } = $props()
++
++  let phase = $state(autoStart ? 'working' : 'ready') // ready | working | done | error
++  let errorMsg = $state('')
++  let installDir = $state('')
++  let defaultInstallDir = $state('')
++
++  onMount(async () => {
++    defaultInstallDir = await window.electronAPI.getInstallDir()
++    installDir = defaultInstallDir
++    if (autoStart) install()
++  })
++
++  const install = async () => {
++    phase = 'working'
++    try {
++      // Save custom install directory before installing
++      if (installDir && installDir !== defaultInstallDir) {
++        await window.electronAPI.setConfig({ installDir })
++      }
++
++      const ok = await window.electronAPI.installPackage()
++      if (!ok) { phase = 'error'; errorMsg = $i18n.t('setup.install.failed'); return }
++
++      await window.electronAPI.startServer()
++      await window.electronAPI.getServerInfo()
++
++      await window.electronAPI.setDefaultConnection('local')
++      config.set(await window.electronAPI.getConfig())
++
++      phase = 'done'
++      setTimeout(async () => {
++        await window.electronAPI.connectTo('local')
++        onComplete()
++      }, 800)
++    } catch (e) {
++      phase = 'error'
++      errorMsg = e?.message || $i18n.t('setup.install.somethingWentWrong')
++    }
++  }
++
++  const changeInstallDir = async () => {
++    const folder = await window.electronAPI.selectFolder()
++    if (folder) {
++      installDir = folder
++    }
++  }
++</script>
++
++<div class="flex flex-col" in:fade={{ duration: 200 }}>
++  <button
++    class="self-start text-[12px] opacity-40 hover:opacity-70 transition mb-6 bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa] disabled:opacity-20"
++    onclick={onBack}
++    disabled={phase === 'working'}
++  >
++    {$i18n.t('common.back')}
++  </button>
++
++  {#if phase === 'ready'}
++    <div class="mb-1 text-sm font-normal opacity-50">{$i18n.t('app.name')}</div>
++    <h1 class="text-2xl font-light tracking-tight mb-2">{$i18n.t('setup.install.title')}</h1>
++    <p class="text-[12px] opacity-30 mb-6 leading-relaxed">
++      {$i18n.t('setup.install.description')}
++    </p>
++
++    <!-- Install location -->
++    <div class="mb-6">
++      <div class="text-[11px] opacity-40 mb-1.5">{$i18n.t('setup.install.installLocation')}</div>
++      <div class="flex items-center gap-2">
++        <div
++          class="flex-1 min-w-0 px-3 py-2 bg-black/[0.04] dark:bg-white/[0.06] text-[12px] text-[#1d1d1f] dark:text-[#fafafa] opacity-50 font-mono truncate rounded-lg"
++          title={installDir}
++        >
++          {installDir || '…'}
++        </div>
++        <button
++          class="shrink-0 text-[11px] opacity-40 hover:opacity-70 px-2.5 py-2 bg-black/[0.04] dark:bg-white/[0.06] transition border-none text-[#1d1d1f] dark:text-[#fafafa] rounded-lg"
++          onclick={changeInstallDir}
++        >
++          {$i18n.t('setup.install.changeLocation')}
++        </button>
++      </div>
++      <div class="text-[10px] opacity-20 mt-1">{$i18n.t('setup.install.installLocationDesc')}</div>
++    </div>
++
++    <button
++      class="w-fit inline-flex items-center gap-2 bg-white px-8 py-2.5 text-black text-[13px] transition hover:bg-gray-100 border-none"
++      onclick={install}
++    >
++      {$i18n.t('setup.install.continue')}
++      <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++        <path stroke-linecap="round" stroke-linejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" />
++      </svg>
++    </button>
++
++  {:else if phase === 'working'}
++    <div class="flex flex-col items-center gap-5 py-10" in:fade={{ duration: 250 }}>
++      <img src={logoImage} class="size-12 rounded-full dark:invert" alt="logo" />
++      <div class="flex flex-col items-center gap-2 text-center">
++        <div class="text-sm opacity-60">{$i18n.t('setup.install.installing')}</div>
++        {#if $serverInfo?.status}
++          <div class="text-[11px] opacity-30 max-w-[220px] leading-relaxed" in:fade={{ duration: 200 }}>
++            {$serverInfo.status}
++          </div>
++        {:else}
++          <div class="text-[11px] opacity-20">
++            {$i18n.t('setup.install.mightTakeMinutes')}
++          </div>
++        {/if}
++      </div>
++    </div>
++
++  {:else if phase === 'done'}
++    <div class="flex flex-col items-center gap-4 py-10" in:fade={{ duration: 250 }}>
++      <img src={logoImage} class="size-12 rounded-full dark:invert" alt="logo" />
++      <div class="text-sm text-green-400 opacity-70">{$i18n.t('common.ready')}</div>
++    </div>
++
++  {:else if phase === 'error'}
++    <div class="flex flex-col items-center gap-4 py-10" in:fade={{ duration: 250 }}>
++      <div class="text-[12px] text-red-400 opacity-80">{errorMsg}</div>
++      <button
++        class="w-fit inline-flex items-center gap-2 bg-black/[0.04] dark:bg-white/[0.06] px-6 py-2 text-[12px] opacity-60 hover:opacity-90 transition border-none text-[#1d1d1f] dark:text-[#fafafa]"
++        onclick={() => (phase = 'ready')}
++      >
++        {$i18n.t('common.retry')}
++      </button>
++    </div>
++  {/if}
++</div>
+diff --git a/src/renderer/src/lib/components/Setup/index.svelte b/src/renderer/src/lib/components/Setup/index.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c4f12794ea1aab4f923912875e408a63b7c409f
+--- /dev/null
++++ b/src/renderer/src/lib/components/Setup/index.svelte
+@@ -0,0 +1,128 @@
++<script lang="ts">
++  import { onMount } from 'svelte'
++  import { fly } from 'svelte/transition'
++  import { appState, config } from '../../stores'
++  import i18n from '../../i18n'
++  import LocalInstall from './LocalInstall.svelte'
++
++
++  let view = $state('main') // main | install
++  let url = $state('')
++  let connecting = $state(false)
++  let error = $state('')
++  let mounted = $state(false)
++  let videoElement: HTMLVideoElement
++
++  onMount(() => {
++    setTimeout(() => { mounted = true }, 100)
++    if (videoElement) {
++      videoElement.play().catch(() => {})
++    }
++  })
++
++  const connect = async () => {
++    if (!url.trim()) return
++    let u = url.trim()
++    if (!u.startsWith('http')) u = 'https://' + u
++    error = ''
++    connecting = true
++    try {
++      const valid = await window.electronAPI.validateUrl(u)
++      if (!valid) { error = $i18n.t('setup.couldNotReachServer'); connecting = false; return }
++      const connId = crypto.randomUUID()
++      await window.electronAPI.addConnection({
++        id: connId,
++        name: new URL(u).hostname,
++        type: 'remote',
++        url: u
++      })
++      config.set(await window.electronAPI.getConfig())
++      await window.electronAPI.connectTo(connId)
++      appState.set('ready')
++    } catch {
++      error = $i18n.t('setup.connectionFailed')
++    } finally {
++      connecting = false
++    }
++  }
++</script>
++
++<div class="h-full w-full relative overflow-hidden bg-[#f5f5f7] dark:bg-[#0a0a0a] text-[#1d1d1f] dark:text-[#fafafa]">
++  <!-- Video background -->
++  <div class="absolute inset-0 overflow-hidden">
++    <video
++      bind:this={videoElement}
++      autoplay
++      muted
++      loop
++      playsinline
++      class="absolute top-1/2 left-1/2 h-auto min-h-full w-auto min-w-full -translate-x-1/2 -translate-y-1/2 object-cover opacity-30"
++    >
++      <source src="https://community.s3.openwebui.com/landing.mp4" type="video/mp4" />
++    </video>
++  </div>
++
++  <!-- Drag region -->
++  <div class="absolute top-0 left-0 right-0 h-8 drag-region z-10"></div>
++
++  <!-- Content -->
++  {#if mounted}
++    <div class="relative z-10 h-full flex flex-col justify-end px-8 pb-10">
++      {#if view === 'main'}
++        <div class="max-w-sm" in:fly={{ duration: 500, y: 10 }}>
++          <div class="mb-2 text-sm font-normal opacity-50">{$i18n.t('app.name')}</div>
++
++          <h1 class="text-3xl leading-tight font-light tracking-tight mb-6">
++            {$i18n.t('setup.newConnection')}
++          </h1>
++
++          <div class="flex flex-col gap-2.5">
++            <div class="flex gap-2">
++              <input
++                type="text"
++                bind:value={url}
++                placeholder={$i18n.t('setup.urlPlaceholder')}
++                class="flex-1 px-4 py-2.5 bg-black/[0.04] dark:bg-white/[0.06] text-[13px] text-[#1d1d1f] dark:text-[#fafafa] placeholder:opacity-20 outline-none focus:bg-white/[0.1] transition no-drag border-none"
++                onkeydown={(e) => e.key === 'Enter' && connect()}
++              />
++
++              <button
++                class="inline-flex items-center gap-2 bg-white px-6 py-2.5 text-black text-[13px] transition hover:bg-gray-100 disabled:opacity-30 border-none shrink-0"
++                onclick={connect}
++                disabled={connecting || !url.trim()}
++              >
++                {connecting ? $i18n.t('common.connecting') : $i18n.t('common.connect')}
++                {#if !connecting}
++                  <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
++                    <path stroke-linecap="round" stroke-linejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" />
++                  </svg>
++                {/if}
++              </button>
++            </div>
++
++            {#if error}
++              <p class="text-[11px] text-red-400 opacity-80">{error}</p>
++            {/if}
++          </div>
++
++          <div class="mt-6">
++            <button
++              class="text-sm opacity-40 hover:opacity-70 transition bg-transparent border-none text-[#1d1d1f] dark:text-[#fafafa]"
++              onclick={() => (view = 'install')}
++            >
++              {$i18n.t('setup.orInstallLocally')}
++            </button>
++          </div>
++        </div>
++
++      {:else if view === 'install'}
++        <div class="max-w-sm">
++          <LocalInstall
++            onBack={() => (view = 'main')}
++            onComplete={() => appState.set('ready')}
++          />
++        </div>
++      {/if}
++    </div>
++  {/if}
++</div>
+diff --git a/src/renderer/src/lib/stores.ts b/src/renderer/src/lib/stores.ts
+index 2718baa554950961e8787597e8893a09cca066be..2f92031214b02f39c48845d8e778db6a6d515afb 100644
+--- a/src/renderer/src/lib/stores.ts
++++ b/src/renderer/src/lib/stores.ts
+@@ -7,3 +7,5 @@ export const serverInfo = writable(null)
+ export const appState = writable('loading') // loading | initializing | setup | ready
+ 
+ export const desktopUpdate = writable<UpdateState>({ status: 'idle' })
++
++export const connections = writable([])
+diff --git a/src/renderer/src/main.ts b/src/renderer/src/main.ts
+index a2ca4ef9fefc10ff8e0a8eab5a511e8dc4169fb5..e06da8da59566382f186a40c73af0964ab189905 100644
+--- a/src/renderer/src/main.ts
++++ b/src/renderer/src/main.ts
+@@ -5,10 +5,9 @@ import { initI18n } from './lib/i18n'
+ 
+ import App from './App.svelte'
+ 
+-initI18n()
+-
+-const app = mount(App, {
+-  target: document.getElementById('app')!
+-})
+-
+-export default app
++const start = async () => {
++  const config: { language?: string } = await window.electronAPI.getConfig().catch(() => ({}))
++  initI18n(config?.language || 'ru-RU')
++  mount(App, { target: document.getElementById('app')! })
++}
++start()
+diff --git a/src/renderer/src/spotlight-main.ts b/src/renderer/src/spotlight-main.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..170f3ab6c5e5d008fc77c450feb5a2136933ba84
+--- /dev/null
++++ b/src/renderer/src/spotlight-main.ts
+@@ -0,0 +1,8 @@
++import { mount } from 'svelte'
++import Spotlight from './components/Spotlight.svelte'
++
++const app = mount(Spotlight, {
++  target: document.getElementById('app')!
++})
++
++export default app

@@ -1,0 +1,1637 @@
+diff --git a/.avx1/connection-view.test.mjs b/.avx1/connection-view.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a5d40276c149d8e8d3bfa29ec0ea9ec40c69389
+--- /dev/null
++++ b/.avx1/connection-view.test.mjs
+@@ -0,0 +1,175 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import ts from 'typescript'
++import { stripTypeScriptTypes } from 'node:module'
++import { handleGuestSend, isGuestSendType, isGuestLoadPage, canRelayDesktopEvent } from '../src/renderer/src/lib/guest-protocol.ts'
++import { handleGuestRequest } from '../src/renderer/src/lib/guest-requests.ts'
++
++const component = readFileSync(new URL('../src/renderer/src/lib/components/Main/Connections/ConnectionView.svelte', import.meta.url), 'utf8')
++const script = component.slice(component.indexOf('>') + 1, component.indexOf('</script>'))
++const tree = ts.createSourceFile('view.ts', script, ts.ScriptTarget.Latest, true)
++const node = tree.statements.find(item => ts.isFunctionDeclaration(item) && item.name?.text === 'attachWebview')
++assert.ok(node)
++const body = stripTypeScriptTypes(node.getText(tree), { mode: 'transform' })
++
++function fixture(connectionId = 'local', serverUrl = 'http://127.0.0.1:8080') {
++  const calls = []
++  const listeners = new Map()
++  let address = serverUrl
++  const api = {
++    getOpenTerminalInfo: async () => { calls.push('terminal'); return { status: 'started', url: 'http://127.0.0.1:39284', apiKey: 'synthetic' } },
++    getOllamaInfo: async () => ({ reachable: true, url: 'http://127.0.0.1:11434' }),
++    getLlamaCppInfo: async () => ({ reachable: true, url: 'http://127.0.0.1:18881' }),
++    getAppInfo: async () => ({ version: 'fixture', platform: 'win32', username: 'private' }),
++    getVersion: async () => 'fixture',
++    setAuthToken: async token => calls.push(['token', token]),
++    isWindowFocused: async () => ({ isFocused: true }),
++    openInBrowser: async url => calls.push(['open', url]),
++    notification: async (...args) => calls.push(['notification', ...args]),
++    setConfig: async value => calls.push(['config', value]),
++    registerConnectionGuest: async (...args) => calls.push(['register', ...args]),
++    unregisterConnectionGuest: async (...args) => calls.push(['unregister', ...args])
++  }
++  const sent = []
++  const wv = {
++    addEventListener: (name, callback) => listeners.set(name, callback),
++    removeEventListener: (name, callback) => { if (listeners.get(name) === callback) listeners.delete(name) },
++    getURL: () => address, getTitle: () => 'fixture', getWebContentsId: () => 7,
++    send: (channel, data) => sent.push({ channel, data })
++  }
++  const factory = new Function('window', 'serverUrl', 'connectionId', 'handleGuestSend', 'isGuestSendType',
++    'isGuestLoadPage', 'canRelayDesktopEvent', 'handleGuestRequest', `
++    let webview, webviewBackground, webviewTitle, canRefresh, webviewError, webviewLoading;
++    const active = true, onSetView = () => {}, $i18n = { t: key => key };
++    const config = { update() {} }, $config = { theme: 'system' };
++    ${body}; return attachWebview;
++  `)
++  const attach = factory({ electronAPI: api }, serverUrl, connectionId, handleGuestSend, isGuestSendType,
++    isGuestLoadPage, canRelayDesktopEvent, handleGuestRequest)
++  const attachment = attach(wv)
++  return { api, calls, sent, listeners, attachment, navigate: value => { address = value },
++    ipc: (channel, payload) => listeners.get('ipc-message')?.({ channel, args: [payload] }) }
++}
++
++test('per-connection guest requests retain safe native API and reject privileged commands', async () => {
++  const f = fixture()
++  await f.ipc('webview:send', { type: 'app:info', _requestId: '1' })
++  assert.deepEqual(f.sent.at(-1).data.data, { version: 'fixture', platform: 'win32', arch: undefined })
++  await f.ipc('webview:send', { type: 'resetApp', _requestId: '2' })
++  assert.deepEqual(f.sent.at(-1).data.data, { error: 'Desktop request rejected' })
++  await f.ipc('webview:send', { type: 'getVersion', _requestId: '3' })
++  assert.equal(f.sent.at(-1).data.data, 'fixture')
++  await f.ipc('webview:send', { type: 'openInBrowser', url: 'file:///private', _requestId: '4' })
++  assert.deepEqual(f.calls, [])
++})
++
++test('local capability replay never reads private Terminal state for remote guests', async () => {
++  const remote = fixture('remote', 'https://saved.invalid')
++  await remote.ipc('webview:ready')
++  assert.deepEqual(remote.calls, [])
++  assert.deepEqual(remote.sent, [])
++  const local = fixture()
++  await local.ipc('webview:ready')
++  assert.deepEqual(local.calls, ['terminal'])
++  assert.equal(local.sent.length, 3)
++  assert.equal(local.sent[0].data.type, 'connections:terminal')
++  assert.equal(local.sent[0].data.data.key, 'synthetic')
++  assert.equal(local.sent[2].data.data.config.provider, 'ollama')
++  assert.equal(local.sent[2].data.data.url, 'http://127.0.0.1:11434/v1')
++})
++
++test('navigation during an awaited capability read or API response blocks later delivery', async () => {
++  const f = fixture()
++  let finish
++  f.api.getOpenTerminalInfo = () => new Promise(resolve => { finish = resolve })
++  const replay = f.ipc('webview:ready')
++  f.navigate('https://evil.invalid')
++  finish({ status: 'started', url: 'http://127.0.0.1:39284', apiKey: 'synthetic' })
++  await replay
++  assert.deepEqual(f.sent, [])
++  const g = fixture()
++  g.api.getAppInfo = () => new Promise(resolve => { finish = resolve })
++  const response = g.ipc('webview:send', { type: 'app:info', _requestId: '1' })
++  g.navigate('https://evil.invalid')
++  finish({ version: 'fixture' })
++  await response
++  assert.deepEqual(g.sent, [])
++})
++
++test('destroy removes listeners and suppresses a pending readiness replay', async () => {
++  const f = fixture()
++  let finish
++  f.api.getOpenTerminalInfo = () => new Promise(resolve => { finish = resolve })
++  const replay = f.ipc('webview:ready')
++  f.attachment.destroy()
++  finish({ status: 'started', url: 'http://127.0.0.1:39284', apiKey: 'synthetic' })
++  await replay
++  assert.equal(f.listeners.size, 0)
++  assert.deepEqual(f.sent, [])
++})
++
++test('the mounted guest registers and unregisters its own connection identity without relaying tokens', async () => {
++  const f = fixture('remote', 'https://saved.invalid')
++  f.listeners.get('dom-ready')()
++  await Promise.resolve()
++  assert.deepEqual(f.calls, [['register', 'remote', 7]])
++  f.attachment.destroy()
++  await Promise.resolve()
++  assert.deepEqual(f.calls, [['register', 'remote', 7], ['unregister', 'remote', 7]])
++})
++
++const connections = readFileSync(new URL('../src/renderer/src/lib/components/Main/Connections.svelte', import.meta.url), 'utf8')
++const connectionScript = connections.slice(connections.indexOf('>') + 1, connections.indexOf('</script>'))
++const connectionTree = ts.createSourceFile('connections.ts', connectionScript, ts.ScriptTarget.Latest, true)
++let connectCode
++ts.forEachChild(connectionTree, node => {
++  if (ts.isVariableStatement(node)) {
++    const declaration = node.declarationList.declarations.find(item => item.name.getText(connectionTree) === 'connect')
++    if (declaration) connectCode = stripTypeScriptTypes('const connect = ' + declaration.initializer.getText(connectionTree))
++  }
++})
++assert.ok(connectCode)
++function connectionFixture(connectTo) {
++  const defaults = []
++  return new Function('window', `
++    let connectRequest = 0, showingLogs = false, activeConnectionId = '', view = 'welcome', connectingId = '', error = '';
++    let openConnections = new Map(); const $i18n = { t: key => key };
++    ${connectCode};
++    return { connect, state: () => ({activeConnectionId, view, connectingId, error, openConnections}) };
++  `)({ electronAPI: { connectTo, setDefaultConnection: async id => { defaults.push(id) } } })
++}
++
++test('late completion cannot replace the newer selected connection', async () => {
++  const pending = new Map()
++  const f = connectionFixture(id => new Promise(resolve => pending.set(id, resolve)))
++  const first = f.connect('local')
++  await Promise.resolve()
++  const second = f.connect('remote')
++  await Promise.resolve()
++  pending.get('remote')({ url: 'https://saved.invalid' })
++  assert.equal(await second, true)
++  pending.get('local')({ url: 'http://127.0.0.1:8080' })
++  assert.equal(await first, false)
++  assert.equal(f.state().activeConnectionId, 'remote')
++  assert.equal(f.state().view, 'connected')
++  assert.equal(f.state().openConnections.has('local'), false)
++})
++
++test('failed local start reports failure without claiming an open connection', async () => {
++  const f = connectionFixture(async () => null)
++  assert.equal(await f.connect('local'), false)
++  assert.equal(f.state().error, 'error.serverStartFailed')
++  assert.equal(f.state().connectingId, '')
++  assert.equal(f.state().openConnections.size, 0)
++})
++
++test('explicit reopen retains the selected view while a sidebar toggle hides it without discarding it', async () => {
++  const f = connectionFixture(async () => ({ url: 'https://saved.invalid' }))
++  await f.connect('remote')
++  assert.equal(await f.connect('remote', false), true)
++  assert.equal(f.state().view, 'connected')
++  await f.connect('remote')
++  assert.equal(f.state().view, 'welcome')
++  assert.equal(f.state().openConnections.size, 1)
++})
+diff --git a/.avx1/desktop-permissions.test.mjs b/.avx1/desktop-permissions.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0424794a01b8705a61f6e2e772b4eacd19e11c75
+--- /dev/null
++++ b/.avx1/desktop-permissions.test.mjs
+@@ -0,0 +1,90 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import ts from 'typescript'
++import { isConfiguredConnectionURL } from '../src/main/guest-webview.ts'
++
++// Evaluate the real registered callbacks with synthetic Electron authorities.
++// No windows, media devices or screen enumeration are used.
++const text = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8')
++const tree = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true)
++function callbacks(name) {
++  const found = []
++  function visit(node) {
++    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
++        node.expression.name.text === name) found.push(node.arguments[0].getText(tree))
++    ts.forEachChild(node, visit)
++  }
++  visit(tree)
++  return found
++}
++const [voiceCode, browserCode] = callbacks('setPermissionRequestHandler')
++const [displayCode] = callbacks('setDisplayMediaRequestHandler')
++assert.equal(callbacks('setPermissionRequestHandler').length, 2)
++const configured = ['https://saved.invalid']
++
++test('voice permission belongs only to its native audio frame', () => {
++  const owner = {}
++  const url = 'file:///app/voice-input.html'
++  const voice = new Function('voiceInputWindow', 'voiceInputURL', `return (${voiceCode})`)(
++    { webContents: owner }, url)
++  const details = { isMainFrame: true, requestingUrl: url, mediaTypes: ['audio'] }
++  function check(content, permission, request) {
++    let granted
++    voice(content, permission, result => { granted = result }, request)
++    return granted
++  }
++  assert.equal(check(owner, 'media', details), true)
++  assert.equal(check({}, 'media', details), false)
++  assert.equal(check(owner, 'media', { ...details, requestingUrl: 'https://evil.invalid' }), false)
++  assert.equal(check(owner, 'media', { ...details, isMainFrame: false }), false)
++  assert.equal(check(owner, 'media', { ...details, mediaTypes: ['audio', 'video'] }), false)
++  assert.equal(check(owner, 'media', { ...details, mediaTypes: [] }), false)
++  assert.equal(check(owner, 'display-capture', details), false)
++})
++
++test('saved browser permissions check requesting frame and limit filesystem access to reads', () => {
++  const browser = new Function('isConfiguredConnectionURL', 'connectionURLs', `return (${browserCode})`)(
++    isConfiguredConnectionURL, () => configured)
++  function check(top, permission, details) {
++    let granted
++    browser({ getURL: () => top }, permission, result => { granted = result }, details)
++    return granted
++  }
++  const details = { requestingUrl: 'https://saved.invalid/chat' }
++  assert.equal(check('https://saved.invalid', 'media', details), true)
++  assert.equal(check('https://saved.invalid', 'media', { requestingUrl: 'https://evil.invalid' }), false)
++  assert.equal(check('https://evil.invalid', 'media', details), false)
++  assert.equal(check('https://saved.invalid', 'fileSystem', { ...details, fileAccessType: 'readable' }), true)
++  assert.equal(check('https://saved.invalid', 'fileSystem', { ...details, fileAccessType: 'writable' }), false)
++  assert.equal(check('https://saved.invalid', 'unknown', details), false)
++})
++
++test('display capture rejects unknown origins and redirects, and handles source failures', async () => {
++  let enumerate = 0
++  let resolveSources
++  const capturer = { getSources: () => { enumerate++; return new Promise(resolve => { resolveSources = resolve }) } }
++  function handler(capture = capturer) {
++    return new Function('isConfiguredConnectionURL', 'connectionURLs', 'desktopCapturer', `return (${displayCode})`)(
++      isConfiguredConnectionURL, () => configured, capture)
++  }
++  const display = handler()
++  const request = { securityOrigin: 'https://saved.invalid', frame: { url: 'https://saved.invalid/chat' } }
++  let granted
++  display({ ...request, securityOrigin: 'https://evil.invalid' }, value => { granted = value })
++  assert.deepEqual(granted, {})
++  assert.equal(enumerate, 0)
++  display(request, value => { granted = value })
++  request.frame.url = 'https://evil.invalid'
++  resolveSources([{ id: 'synthetic-screen' }])
++  await Promise.resolve()
++  assert.deepEqual(granted, {})
++  request.frame.url = 'https://saved.invalid/chat'
++  display(request, value => { granted = value })
++  resolveSources([{ id: 'synthetic-screen' }])
++  await Promise.resolve()
++  assert.deepEqual(granted, { video: { id: 'synthetic-screen' }, audio: 'loopback' })
++  handler({ getSources: () => Promise.reject(Error('synthetic failure')) })(request, value => { granted = value })
++  await Promise.resolve()
++  assert.deepEqual(granted, {})
++})
+diff --git a/.avx1/test_desktop_security.mjs b/.avx1/test_desktop_security.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4006e98d0f3785b1696f7e0f87916b8d68e6c3e4
+--- /dev/null
++++ b/.avx1/test_desktop_security.mjs
+@@ -0,0 +1,100 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import fs from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++import { handleGuestSend, isGuestLoadPage, isGuestPushType, canRelayDesktopEvent } from '../src/renderer/src/lib/guest-protocol.ts'
++import { secureGuestWebPreferences, isConfiguredConnectionURL, isConfiguredCertificateHost } from '../src/main/guest-webview.ts'
++
++test('actual upstream guest preload exposes only the two supported bridge methods', async () => {
++  const exposed = {}, handlers = {}, sent = []
++  const source = fs.readFileSync(new URL('../src/preload/content-preload.ts', import.meta.url), 'utf8')
++  const body = stripTypeScriptTypes(source.replace(/^import .* from 'electron'\r?\n/m, ''))
++  new Function('ipcRenderer', 'contextBridge', 'window', body)(
++    { on: (name, callback) => { handlers[name] = callback }, removeListener: () => {},
++      sendToHost: (...args) => sent.push(args) },
++    { exposeInMainWorld: (name, value) => { exposed[name] = value } },
++    { addEventListener: () => {} })
++  assert.deepEqual(Object.keys(exposed.electronAPI).sort(), ['onEvent', 'send'])
++  const events = []
++  exposed.electronAPI.onEvent(value => events.push(value))
++  handlers['desktop:event']({}, { type: 'models:refresh' })
++  assert.deepEqual(events, [{ type: 'models:refresh' }])
++  assert.deepEqual(sent.shift(), ['webview:ready'])
++  const response = exposed.electronAPI.send({ type: 'app:info' })
++  const [channel, request] = sent.shift()
++  assert.equal(channel, 'webview:send')
++  assert.equal(request.type, 'app:info')
++  handlers['desktop:response']({}, { _responseId: request._requestId, data: { version: 'fixture' } })
++  assert.deepEqual(await response, { version: 'fixture' })
++})
++
++test('untrusted guest cannot call privileged APIs, read config, replace preload or widen TLS trust', async () => {
++  const calls = []
++  const api = {
++    setAuthToken: async token => calls.push(token),
++    getAppInfo: async () => ({version:'fixture',platform:'win32',arch:'x64',username:'private',apiKey:'private'}),
++    isWindowFocused: async () => ({isFocused:true}),
++    resetApp: () => { throw Error('Privileged API must never run') }
++  }
++  for (const type of ['resetApp','setConfig','__proto__','constructor','startServer']) {
++    assert.equal(await handleGuestSend({type}, api), undefined)
++  }
++  assert.equal(await handleGuestSend(null, api), undefined)
++  assert.equal(await handleGuestSend({type:'app:data'}, api), null)
++  assert.deepEqual(await handleGuestSend({type:'app:info'}, api), {version:'fixture',platform:'win32',arch:'x64'})
++  await handleGuestSend({type:'token:update',token:'valid-fixture'}, api)
++  for (const token of ['',4,'x'.repeat(16385)]) await handleGuestSend({type:'token:update',token}, api)
++  assert.deepEqual(calls,['valid-fixture'])
++  assert.equal(isGuestLoadPage('settings'),true)
++  assert.equal(isGuestLoadPage('../../private'),false)
++  const preferences={nodeIntegration:true,sandbox:false,preload:'/evil/preload/content-preload.js'}
++  assert.equal(secureGuestWebPreferences(preferences,'https://configured.invalid/','/owned/content-preload.js'),true)
++  assert.equal(preferences.preload,'/owned/content-preload.js')
++  assert.equal(preferences.nodeIntegration,false)
++  assert.equal(preferences.nodeIntegrationInSubFrames,false)
++  assert.equal(preferences.sandbox,true)
++  assert.equal(preferences.contextIsolation,true)
++  for (const url of ['file:///private','javascript:alert(1)','https://user:pass@configured.invalid']) {
++    assert.equal(secureGuestWebPreferences({},url,'/owned/content-preload.js'),false)
++  }
++  const configured=['https://configured.invalid:8443/path']
++  assert.equal(isConfiguredConnectionURL('https://configured.invalid:8443/chat',configured),true)
++  for (const url of ['https://configured.invalid:443/','https://other.invalid/','file:///private']) {
++    assert.equal(isConfiguredConnectionURL(url,configured),false)
++  }
++  assert.equal(isConfiguredCertificateHost('configured.invalid',configured),true)
++  assert.equal(isConfiguredCertificateHost('other.invalid',configured),false)
++  assert.equal(isConfiguredConnectionURL('http://127.0.0.1:8080/',configured),true)
++})
++
++test('actual outbound relay never broadcasts local credentials or delivers them after redirect', () => {
++  const source = fs.readFileSync(new URL('../src/renderer/src/lib/components/Main/Connections.svelte', import.meta.url), 'utf8')
++  const start = source.indexOf('  const sendToWebview = ')
++  const end = source.indexOf('\n  // Listen for events from main process', start)
++  assert.ok(start >= 0 && end > start)
++  const body = stripTypeScriptTypes(source.slice(start, end))
++  const sent = []
++  let address = 'about:blank', partition = 'persist:connection-local', ready
++  const view = {getURL:()=>address,getAttribute:()=>partition,send:(_channel,event)=>sent.push(event),
++    addEventListener:(_event,callback)=>{ready=callback},removeEventListener:()=>{}}
++  const document = {querySelector:()=>({querySelectorAll:()=>[view],querySelector:()=>view})}
++  const send = new Function('document','localConn','isGuestPushType','canRelayDesktopEvent',body+';return sendToWebview;')(
++    document,{url:'http://127.0.0.1:8080'},isGuestPushType,canRelayDesktopEvent)
++  const secret = {type:'connections:terminal',data:{key:'fixture-private-key'}}
++  send(secret)
++  assert.equal(sent.length,0)
++  address = 'https://other.invalid/'
++  ready()
++  assert.equal(sent.length,0)
++  partition = 'persist:connection-remote'
++  send(secret)
++  assert.equal(sent.length,0)
++  partition = 'persist:connection-local';address = 'http://127.0.0.1:8080/'
++  send(secret)
++  assert.deepEqual(sent,[secret])
++  send({type:'error',data:{message:'private machine path'}})
++  assert.equal(sent.length,1)
++  assert.equal(canRelayDesktopEvent('connections:terminal','https://other.invalid','https://other.invalid',false),false)
++  assert.equal(canRelayDesktopEvent('query','https://other.invalid',undefined,false),false)
++  assert.equal(canRelayDesktopEvent('query','https://other.invalid',undefined,true),true)
++})
+diff --git a/src/main/guest-webview.ts b/src/main/guest-webview.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa17e217fe6cb4c59d33f5a886d1ddd2614c86ff
+--- /dev/null
++++ b/src/main/guest-webview.ts
+@@ -0,0 +1,44 @@
++import type { WebPreferences } from 'electron'
++
++/** Constrain remote guests to the shipped relay preload and Chromium sandbox. */
++export function secureGuestWebPreferences(
++  preferences: WebPreferences,
++  source: string | undefined,
++  contentPreload: string
++): boolean {
++  preferences.nodeIntegration = false
++  preferences.nodeIntegrationInWorker = false
++  preferences.nodeIntegrationInSubFrames = false
++  preferences.contextIsolation = true
++  preferences.sandbox = true
++  preferences.webSecurity = true
++  preferences.allowRunningInsecureContent = false
++  preferences.preload = contentPreload
++  try {
++    const url = new URL(source ?? '')
++    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
++  } catch {
++    return false
++  }
++}
++
++export function isConfiguredConnectionURL(value: string, connections: string[]): boolean {
++  try {
++    const url = new URL(value)
++    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false
++    if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return true
++    return connections.some((entry) => {
++      try { return new URL(entry).origin === url.origin } catch { return false }
++    })
++  } catch { return false }
++}
++
++export function isConfiguredCertificateHost(hostname: string, connections: string[]): boolean {
++  if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname)) return true
++  return connections.some((entry) => {
++    try {
++      const url = new URL(entry)
++      return url.protocol === 'https:' && !url.username && !url.password && url.hostname === hostname
++    } catch { return false }
++  })
++}
+diff --git a/src/renderer/src/lib/components/Main/Connections/ConnectionView.svelte b/src/renderer/src/lib/components/Main/Connections/ConnectionView.svelte
+new file mode 100644
+index 0000000000000000000000000000000000000000..75dd7ee8ae7565271dafb0eef272c8c0229152b4
+--- /dev/null
++++ b/src/renderer/src/lib/components/Main/Connections/ConnectionView.svelte
+@@ -0,0 +1,534 @@
++<script lang="ts">
++  import ArrowRightIcon from 'iconoir/icons/arrow-right.svg?raw'
++  import GlobeIcon from 'iconoir/icons/globe.svg?raw'
++  import RestartIcon from 'iconoir/icons/restart.svg?raw'
++  import WarningCircleIcon from 'iconoir/icons/warning-circle.svg?raw'
++  import type { WebviewTag, DidFailLoadEvent, ConsoleMessageEvent, IpcMessageEvent, PageTitleUpdatedEvent } from 'electron'
++  import { handleGuestRequest } from '../../../guest-requests'
++  import { handleGuestSend, isGuestSendType, isGuestLoadPage, canRelayDesktopEvent } from '../../../guest-protocol'
++  import { onMount } from 'svelte'
++  import { fade, fly } from 'svelte/transition'
++  import { config, serverInfo, appState } from '../../../stores'
++  import i18n from '../../../i18n'
++  import GetStartedModal from './GetStartedModal.svelte'
++  import logoImage from '../../../assets/images/splash.png'
++  import landingVideo from '../../../../assets/landing.mp4'
++
++  let {
++    connectionId = 'local',
++    active = true,
++    onSetView,
++    serverUrl,
++    connecting,
++    canRefresh = $bindable(false),
++    launchError,
++    localInstalled,
++    installPhase,
++    installError,
++    installStatus,
++    toastVisible,
++    onStartInstall,
++    onOpenWebUI,
++    onOpenTerminal
++  }: {
++    connectionId?: string
++    active?: boolean
++    onSetView: (view: string) => void
++    serverUrl: string
++    connecting: boolean
++    canRefresh?: boolean
++    launchError: string
++    localInstalled: boolean
++    installPhase: string
++    installError: string
++    installStatus: string
++    toastVisible: boolean
++    onStartInstall: (options?: { installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => void
++    onOpenWebUI: () => void
++    onOpenTerminal: () => void
++  } = $props()
++
++  let showGetStartedModal = $state(false)
++
++  const isInitializing = $derived($appState === 'initializing')
++  const insufficientStorage = $derived(
++    $appState?.startsWith('insufficient-storage:') ? $appState.split(':')[1] : null
++  )
++  const installFailed = $derived(
++    $appState?.startsWith('install-failed:') ? $appState.substring('install-failed:'.length) : null
++  )
++
++  let webviewLoading = $state(false)
++  let webviewBackground = $state<string | null>(null)
++  let webviewTitle = $state('')
++  let webviewError = $state<{ code: number; description: string; url: string } | null>(null)
++  let contentPreloadPath = $state('')
++  let webview: WebviewTag | undefined
++  const activeWebviewError = $derived(serverUrl ? webviewError : null)
++  const isLoading = $derived(connecting || (!!serverUrl && !activeWebviewError && webviewLoading))
++  let startupLine = $state('')
++  const loadingStatus = $derived(startupLine || installStatus)
++
++  $effect(() => {
++    startupLine = ''
++    if (!isLoading || connectionId !== 'local') return undefined
++    return window.electronAPI.onTerminalLine('server', (line: string) => {
++      startupLine = line
++    })
++  })
++
++  export const refresh = (): void => {
++    if (!canRefresh || !webview) return
++    webviewError = null
++    webview.reload()
++  }
++  const openActiveInBrowser = (): void => { void window.electronAPI.openInBrowser(serverUrl) }
++
++  onMount(() => {
++    let disposed = false
++    window.electronAPI.getContentPreloadPath().then((path: string) => {
++      if (!disposed) contentPreloadPath = path
++    })
++    return () => {
++      disposed = true
++    }
++  })
++
++  function attachWebview(wv: WebviewTag): { destroy: () => void } {
++    webview = wv
++    webviewBackground = null
++    webviewTitle = ''
++    canRefresh = false
++    webviewError = null
++    webviewLoading = true
++    let disposed = false
++    let guestId: number | undefined
++    const listeners: [string, (event: Event) => void][] = []
++    const listen = <E extends Event>(name: string, callback: (event: E) => void): void => {
++      const listener = callback as (event: Event) => void
++      wv.addEventListener(name, listener)
++      listeners.push([name, listener])
++    }
++    const send = (event: unknown): void => {
++      if (disposed) return
++      try {
++        const payload = event as { type?: string }
++        if (!canRelayDesktopEvent(payload?.type, wv.getURL(), connectionId === 'local' ? serverUrl : undefined, false)) return
++        wv.send('desktop:event', event)
++      } catch {
++        /* Webview is navigating. */
++      }
++    }
++    listen('did-start-loading', () => {
++      webviewLoading = true
++    })
++    listen('dom-ready', () => {
++      guestId = wv.getWebContentsId()
++      void window.electronAPI.registerConnectionGuest(connectionId, guestId).catch(() => {})
++      canRefresh = true
++      webviewTitle = wv.getTitle()
++    })
++    listen('page-title-updated', (event: PageTitleUpdatedEvent) => {
++      webviewTitle = event.title
++    })
++    listen('did-stop-loading', () => {
++      webviewLoading = false
++    })
++    listen('did-fail-load', (event: DidFailLoadEvent) => {
++      if (event.errorCode === -3 || event.isMainFrame === false) return
++      canRefresh = true
++      webviewError = {
++        code: event.errorCode,
++        description: event.errorDescription || $i18n.t('error.unknown'),
++        url: event.validatedURL || ''
++      }
++    })
++    listen('did-navigate', () => {
++      webviewError = null
++    })
++    listen('render-process-gone', () => {
++      webviewError = { code: -1, description: 'crashed', url: '' }
++    })
++    listen('console-message', (event: ConsoleMessageEvent) => {
++      if (event.level >= 2) console.warn('[webview]', event.message)
++    })
++    listen('ipc-message', async (event: IpcMessageEvent) => {
++      const sameConnection = () => {
++        try { return !disposed && new URL(wv.getURL()).origin === new URL(serverUrl).origin }
++        catch { return false }
++      }
++      try { if (!sameConnection()) return } catch { return }
++      if (event.channel === 'webview:ready') {
++        if (connectionId !== 'local') return
++        const terminal = await window.electronAPI.getOpenTerminalInfo()
++        if (terminal?.status === 'started' && terminal.url && terminal.apiKey) {
++          send({ type: 'connections:terminal', data: { action: 'add', url: terminal.url, key: terminal.apiKey } })
++        }
++        const runtimes = await Promise.all([
++          window.electronAPI.getLlamaCppInfo(), window.electronAPI.getOllamaInfo()
++        ])
++        for (const [index, info] of runtimes.entries()) {
++          if (sameConnection() && info?.reachable && info.url) {
++            send({ type: 'connections:openai', data: {
++              action: 'add', url: `${info.url}/v1`,
++              config: { provider: index === 0 ? 'llama.cpp' : 'ollama', connection_type: 'local' }
++            } })
++          }
++        }
++      } else if (event.channel === 'webview:send') {
++        const request = event.args?.[0]
++        if (!request) return
++        let response: unknown
++        try {
++          response = isGuestSendType(request.type)
++            ? await handleGuestSend(request, window.electronAPI)
++            : await handleGuestRequest(window.electronAPI, request)
++        } catch {
++          response = { error: 'Desktop request rejected' }
++        }
++        if (sameConnection() && typeof request._requestId === 'string' && request._requestId.length <= 64) {
++          try {
++            wv.send('desktop:response', { _responseId: request._requestId, data: response })
++          } catch {
++            /* Webview is navigating. */
++          }
++        }
++      } else if (event.channel === 'webview:load') {
++        const page = event.args?.[0]
++        if (isGuestLoadPage(page)) onSetView(page === 'home' ? 'welcome' : page)
++      } else if (event.channel === 'webview:event') {
++        const payload = event.args?.[0]
++        if (payload?.type !== 'theme:update' || !active) return
++        const webuiTheme = typeof payload.data?.theme === 'string' ? payload.data.theme : 'system'
++        const theme =
++          webuiTheme === 'system' ? 'system' : webuiTheme.includes('dark') ? 'dark' : 'light'
++        const resolved = ['dark', 'light'].includes(payload.data?.resolvedTheme)
++          ? payload.data.resolvedTheme
++          : theme === 'system'
++            ? window.matchMedia('(prefers-color-scheme: dark)').matches
++              ? 'dark'
++              : 'light'
++            : theme
++        const background = payload.data?.background
++        if (typeof background === 'string' && CSS.supports('color', background)) {
++          webviewBackground = background
++        }
++        document.documentElement.classList.remove('light', 'dark')
++        document.documentElement.classList.add(resolved)
++        if ($config?.theme !== theme) {
++          config.update((current) => ({ ...current, theme }))
++          await window.electronAPI.setConfig({ theme })
++        }
++      }
++    })
++    return {
++      destroy() {
++        disposed = true
++        if (guestId !== undefined) void window.electronAPI.unregisterConnectionGuest(connectionId, guestId).catch(() => {})
++        for (const [name, callback] of listeners) wv.removeEventListener(name, callback)
++        webview = undefined
++        webviewTitle = ''
++        canRefresh = false
++      }
++    }
++  }
++</script>
++
++<div
++  class="flex-1 flex flex-col min-h-0 min-w-0 overflow-clip bg-[#eee] dark:bg-[#111] relative content-webview-container"
++>
++  {#if serverUrl && contentPreloadPath}
++    <div
++      class="webview-inset flex shrink-0 items-center justify-center bg-white dark:bg-[#171717]"
++      style:height="var(--window-drag-height)"
++      style:padding-inline="var(--window-title-padding)"
++      style:background-color={webviewBackground}
++    >
++      <span class="truncate text-[11px] font-medium opacity-60" title={webviewTitle}>{webviewTitle}</span>
++    </div>
++    <webview
++      src={serverUrl}
++      class="connection-webview flex-1 min-h-0 border-none"
++      style="display: flex"
++      partition="persist:connection-{connectionId}"
++      preload={contentPreloadPath}
++      use:attachWebview
++      allowpopups
++    ></webview>
++  {/if}
++
++  <!-- Error overlay when webview fails to load -->
++  {#if activeWebviewError}
++    <div
++      class="absolute inset-0 z-20 flex items-center justify-center bg-[#eee] dark:bg-[#111]"
++      transition:fade={{ duration: 200 }}
++    >
++      <div class="text-center max-w-sm px-6">
++        <div
++          class="mx-auto mb-4 w-10 h-10 rounded-full bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center"
++        >
++          {#if activeWebviewError.code === -1}
++            <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full w-5 h-5 opacity-30">{@html WarningCircleIcon}</span>
++          {:else}
++            <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full w-5 h-5 opacity-30">{@html GlobeIcon}</span>
++          {/if}
++        </div>
++        <div class="text-[14px] font-medium mb-1 opacity-80">
++          {activeWebviewError.code === -1
++            ? $i18n.t('setup.pageCrashed')
++            : $i18n.t('setup.couldNotLoadPage')}
++        </div>
++        <div class="text-[12px] opacity-30 mb-1">{activeWebviewError.description}</div>
++        {#if activeWebviewError.url}
++          <div class="text-[11px] opacity-20 mb-6 break-all font-mono">
++            {activeWebviewError.url}
++          </div>
++        {:else}
++          <div class="mb-6"></div>
++        {/if}
++        <div class="flex gap-2 justify-center">
++          <button
++            class="px-4 py-2 rounded-xl text-[13px] font-medium bg-black dark:bg-white text-white dark:text-black border-none cursor-pointer transition hover:bg-gray-800 dark:hover:bg-gray-100 active:scale-[0.98]"
++            onclick={refresh}
++          >
++            {$i18n.t('common.retry')}
++          </button>
++          <button
++            class="px-4 py-2 rounded-xl text-[13px] bg-black/[0.04] dark:bg-white/[0.06] text-[#1d1d1f] dark:text-[#fafafa] border-none cursor-pointer opacity-60 hover:opacity-90 transition active:scale-[0.98]"
++            onclick={openActiveInBrowser}
++          >
++            {$i18n.t('setup.openInBrowser')}
++          </button>
++        </div>
++      </div>
++    </div>
++  {/if}
++
++  <!-- Loading overlay for webview -->
++  {#if isLoading}
++    <div
++      class="absolute inset-0 z-10 flex items-center justify-center bg-[#eee] dark:bg-[#111]"
++      transition:fade={{ duration: 200 }}
++    >
++      <div class="flex w-full min-w-0 flex-col items-center gap-3 px-6">
++        <div
++          class="w-6 h-6 rounded-full border-2 border-black/10 dark:border-white/15 border-t-black/50 dark:border-t-white/50 animate-spin"
++        ></div>
++        <div class="flex w-full min-w-0 flex-col items-center gap-1.5" role="status">
++          <span class="text-[12px] opacity-90">{$i18n.t('common.loading')}</span>
++          {#if loadingStatus}
++            <button
++              type="button"
++              class="max-w-[min(240px,100%)] truncate font-mono text-[11px] opacity-25 hover:opacity-40 focus-visible:opacity-40"
++              title={loadingStatus}
++              aria-label={$i18n.t('logs.expand')}
++              onclick={onOpenTerminal}
++              >{loadingStatus}</button
++            >
++          {/if}
++        </div>
++      </div>
++    </div>
++  {/if}
++
++  {#if !serverUrl}
++    {#if insufficientStorage}
++      <div class="px-5 py-2.5 flex items-center gap-3 bg-red-500/[0.06] border-b border-red-500/10">
++        <div class="flex-1">
++          <div class="text-[12px] text-red-400 font-medium">
++            {$i18n.t('main.notEnoughDiskSpace')}
++          </div>
++          <div class="text-[11px] opacity-40 mt-0.5">
++            {$i18n.t('main.diskSpaceRequired', { available: insufficientStorage })}
++          </div>
++        </div>
++        <button
++          class="shrink-0 text-[11px] px-3 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] opacity-60 hover:opacity-90 transition border-none text-[#1d1d1f] dark:text-[#fafafa] cursor-pointer"
++          onclick={async () => {
++            const MINIMUM_DISK_BYTES = 5 * 1024 * 1024 * 1024
++            const disk = await window.electronAPI.getDiskSpace()
++            if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
++              const gb = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
++              appState.set(`insufficient-storage:${gb}`)
++              return
++            }
++            appState.set('initializing')
++            window.electronAPI
++              .installPython()
++              .then(() => appState.set('ready'))
++              .catch((e) => {
++                appState.set(
++                  `install-failed:${e?.message || $i18n.t('error.pythonInstallFailed')}`
++                )
++              })
++          }}
++        >
++          {$i18n.t('common.retry')}
++        </button>
++      </div>
++    {:else if installFailed}
++      <div class="px-5 py-2.5 flex items-center gap-3 bg-red-500/[0.06] border-b border-red-500/10">
++        <div class="flex-1">
++          <div class="text-[12px] text-red-400 font-medium">
++            {$i18n.t('error.installFailedGeneric')}
++          </div>
++          <div class="text-[11px] opacity-40 mt-0.5 line-clamp-2">
++            {installFailed}
++          </div>
++        </div>
++        <button
++          class="shrink-0 text-[11px] px-3 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] opacity-60 hover:opacity-90 transition border-none text-[#1d1d1f] dark:text-[#fafafa] cursor-pointer"
++          onclick={async () => {
++            const MINIMUM_DISK_BYTES = 5 * 1024 * 1024 * 1024
++            const disk = await window.electronAPI.getDiskSpace()
++            if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
++              const gb = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
++              appState.set(`insufficient-storage:${gb}`)
++              return
++            }
++            appState.set('initializing')
++            window.electronAPI
++              .installPython()
++              .then(() => appState.set('ready'))
++              .catch((e) => {
++                appState.set(
++                  `install-failed:${e?.message || $i18n.t('error.pythonInstallFailed')}`
++                )
++              })
++          }}
++        >
++          {$i18n.t('common.retry')}
++        </button>
++      </div>
++    {:else if isInitializing}
++      <div class="px-5 py-1.5 text-[11px] opacity-25">
++        {$i18n.t('setup.settingUp')}{#if $serverInfo?.status}
++          {$i18n.t(`common.${$serverInfo.status === 'started' ? 'running' : $serverInfo.status}`)}
++        {/if}
++      </div>
++    {/if}
++
++    <div class="flex-1 flex items-center justify-center px-6 relative overflow-hidden">
++      {#if localInstalled}
++        <div class="text-center max-w-[320px]" in:fade={{ duration: 200 }}>
++          <div class="text-lg opacity-80 mb-1.5">{$i18n.t('app.name')}</div>
++          <div class="text-[12px] opacity-30 mb-6">
++            {$i18n.t('main.localReady')}
++          </div>
++          <button
++            class="px-4 py-2 rounded-xl text-[13px] bg-black dark:bg-white text-white dark:text-black border-none disabled:opacity-40"
++            onclick={onOpenWebUI}
++            disabled={connecting || installPhase === 'working'}>{$i18n.t('main.openWebUI')}</button
++          >
++          {#if launchError}<div class="mt-3 text-[12px] opacity-60" role="alert">
++              {launchError}
++            </div>{/if}
++          {#if installPhase === 'working' && installStatus}<div class="mt-3 text-[12px] opacity-40">
++              {installStatus}
++            </div>{/if}
++        </div>
++      {:else}
++        <!-- Theme-responsive hero section -->
++        <div class="absolute inset-0 bg-white dark:bg-black">
++          <!-- Video background -->
++          <video
++            autoplay
++            muted
++            loop
++            playsinline
++            class="absolute inset-0 w-full h-full object-cover pointer-events-none"
++          >
++            <source src={landingVideo} type="video/mp4" />
++          </video>
++
++          <!-- Gradient overlay -->
++          <div
++            class="absolute inset-0 bg-gradient-to-b from-white/10 via-white/90 via-75% to-white dark:from-black/10 dark:via-black/90 dark:to-black pointer-events-none"
++          ></div>
++
++          <img
++            src={logoImage}
++            alt=""
++            draggable="false"
++            class="absolute left-[34px] top-[48px] w-[30px] h-[30px] dark:invert pointer-events-none"
++          />
++
++          <!-- Content positioned bottom-left -->
++          <div class="absolute bottom-0 left-0 right-0 px-[40px] py-[56px]" in:fade={{ duration: 300 }}>
++            <div class="max-w-[440px]">
++              <div
++                class="text-3xl font-medium mb-3 tracking-tight text-black dark:text-white"
++              >
++                {$i18n.t('app.name')}
++              </div>
++              <div
++                class="text-base opacity-60 mb-8 leading-relaxed text-black dark:text-white"
++              >
++                {$i18n.t('main.localDescription')}
++              </div>
++
++              {#if !localInstalled}
++                <button
++                  class="group inline-flex items-center {installPhase === 'working' ? 'justify-start' : 'justify-between'} gap-2.5 w-[220px] max-w-full h-[36px] bg-black dark:bg-white px-4 rounded-none text-white dark:text-black text-[13px] border-none disabled:opacity-50"
++                  onclick={() => {
++                    if (installPhase === 'error') {
++                      onStartInstall()
++                    } else {
++                      showGetStartedModal = true
++                    }
++                  }}
++                  disabled={installPhase === 'working'}
++                >
++                  {#if installPhase === 'working'}
++                    <div
++                      class="w-3.5 h-3.5 rounded-full border-2 border-white/30 dark:border-black/30 border-t-white dark:border-t-black animate-spin"
++                    ></div>
++                    {$i18n.t('common.installing')}
++                  {:else if installPhase === 'error'}
++                    {$i18n.t('common.retry')}
++                    <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full h-3.5 w-3.5">{@html RestartIcon}</span>
++                  {:else}
++                    {$i18n.t('main.getStarted')}
++                    <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full h-3.5 w-3.5 motion-safe:transition-transform duration-200 ease-out motion-safe:group-hover:translate-x-1">{@html ArrowRightIcon}</span>
++                  {/if}
++                </button>
++
++                {#if installPhase === 'working' && installStatus}
++                  <div
++                    class="mt-3 text-[12px] opacity-40 font-mono line-clamp-1"
++                    in:fade={{ duration: 200 }}
++                  >
++                    {installStatus}
++                  </div>
++                {/if}
++              {/if}
++            </div>
++          </div>
++        </div>
++      {/if}
++
++      <!-- Error toast -->
++      {#if toastVisible && installError}
++        <div
++          class="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-500/90 backdrop-blur-sm text-white text-[12px] px-4 py-2 rounded-xl shadow-lg"
++          in:fly={{ y: -10, duration: 200 }}
++          out:fade={{ duration: 150 }}
++        >
++          {installError}
++        </div>
++      {/if}
++    </div>
++  {/if}
++
++  {#if showGetStartedModal}
++    <GetStartedModal
++      onContinue={(options) => {
++        showGetStartedModal = false
++        onStartInstall(options)
++      }}
++      onCancel={() => {
++        showGetStartedModal = false
++      }}
++    />
++  {/if}
++</div>
+diff --git a/src/renderer/src/lib/components/Main/Connections/Content.svelte b/src/renderer/src/lib/components/Main/Connections/Content.svelte
+index 78c685e0a6bbf9051b3673e04b4f1218812d5383..420f6e4bd82ef3f574414e15917874c1c347572a 100644
+--- a/src/renderer/src/lib/components/Main/Connections/Content.svelte
++++ b/src/renderer/src/lib/components/Main/Connections/Content.svelte
+@@ -1,513 +1,45 @@
+ <script lang="ts">
+-  import ArrowRightIcon from 'iconoir/icons/arrow-right.svg?raw'
+-  import GlobeIcon from 'iconoir/icons/globe.svg?raw'
+-  import RestartIcon from 'iconoir/icons/restart.svg?raw'
+-  import WarningCircleIcon from 'iconoir/icons/warning-circle.svg?raw'
+-  import type { WebviewTag, DidFailLoadEvent, ConsoleMessageEvent, IpcMessageEvent, PageTitleUpdatedEvent } from 'electron'
+-  import { handleGuestRequest } from '../../../guest-requests'
+-  import { onMount } from 'svelte'
+-  import { fade, fly } from 'svelte/transition'
+-  import { config, serverInfo, appState } from '../../../stores'
+-  import i18n from '../../../i18n'
+-  import GetStartedModal from './GetStartedModal.svelte'
+-  import logoImage from '../../../assets/images/splash.png'
+-  import landingVideo from '../../../../assets/landing.mp4'
+-
++  import ConnectionView from './ConnectionView.svelte'
++  import AddConnectionModal from './AddConnectionModal.svelte'
+   let {
+-    serverUrl,
+-    connecting,
+     canRefresh = $bindable(false),
+-    launchError,
+-    localInstalled,
+-    installPhase,
+-    installError,
+-    installStatus,
+-    toastVisible,
+-    onStartInstall,
+-    onOpenWebUI,
+-    onOpenTerminal
++    view, activeConnectionId, connectingId, openConnections, localInstalled,
++    installPhase, installError, installStatus, toastVisible,
++    url = $bindable(''), connecting = $bindable(false), error = $bindable(''),
++    showAddConnectionModal = $bindable(false),
++    onStartInstall, onAddConnection, onSetView, onOpenWebUI, onOpenTerminal
+   }: {
+-    serverUrl: string
+-    connecting: boolean
+-    canRefresh?: boolean
+-    launchError: string
+-    localInstalled: boolean
+-    installPhase: string
+-    installError: string
+-    installStatus: string
+-    toastVisible: boolean
+-    onStartInstall: (options?: { installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => void
+-    onOpenWebUI: () => void
+-    onOpenTerminal: () => void
++    canRefresh?: boolean; sidebarOpen: boolean; view: string; activeConnectionId: string; connectingId: string;
++    openConnections: Map<string, string>; localConn: unknown; localInstalled: boolean;
++    remoteConnections: unknown[]; installPhase: string; installError: string;
++    installStatus: string; toastVisible: boolean; url: string; connecting: boolean;
++    error: string; showAddConnectionModal: boolean;
++    onStartInstall: (options?: { installOpenTerminal?: boolean; installLlamaCpp?: boolean; installOllama?: boolean; installDir?: string }) => void;
++    onAddConnection: () => void; onSetView: (view: string) => void;
++    onOpenWebUI: (id: string) => void; onOpenTerminal: () => void;
+   } = $props()
+-
+-  let showGetStartedModal = $state(false)
+-
+-  const isInitializing = $derived($appState === 'initializing')
+-  const insufficientStorage = $derived(
+-    $appState?.startsWith('insufficient-storage:') ? $appState.split(':')[1] : null
+-  )
+-  const installFailed = $derived(
+-    $appState?.startsWith('install-failed:') ? $appState.substring('install-failed:'.length) : null
+-  )
+-
+-  let webviewLoading = $state(false)
+-  let webviewBackground = $state<string | null>(null)
+-  let webviewTitle = $state('')
+-  let webviewError = $state<{ code: number; description: string; url: string } | null>(null)
+-  let contentPreloadPath = $state('')
+-  let webview: WebviewTag | undefined
+-  const activeWebviewError = $derived(serverUrl ? webviewError : null)
+-  const isLoading = $derived(connecting || (!!serverUrl && !activeWebviewError && webviewLoading))
+-  let startupLine = $state('')
+-  const loadingStatus = $derived(startupLine || installStatus)
+-
+-  $effect(() => {
+-    startupLine = ''
+-    if (!isLoading) return
+-    return window.electronAPI.onTerminalLine('server', (line: string) => {
+-      startupLine = line
+-    })
+-  })
+-
+-  export const refresh = (): void => {
+-    if (!canRefresh || !webview) return
+-    webviewError = null
+-    webview.reload()
+-  }
+-  const openActiveInBrowser = (): void => window.electronAPI.openInBrowser(serverUrl)
+-
+-  onMount(() => {
+-    let disposed = false
+-    window.electronAPI.getContentPreloadPath().then((path: string) => {
+-      if (!disposed) contentPreloadPath = path
+-    })
+-    return () => {
+-      disposed = true
+-    }
+-  })
+-
+-  function attachWebview(wv: WebviewTag): { destroy: () => void } {
+-    webview = wv
+-    webviewBackground = null
+-    webviewTitle = ''
+-    canRefresh = false
+-    webviewError = null
+-    webviewLoading = true
+-    let disposed = false
+-    const listeners: [string, (event: Event) => void][] = []
+-    const listen = <E extends Event>(name: string, callback: (event: E) => void): void => {
+-      const listener = callback as (event: Event) => void
+-      wv.addEventListener(name, listener)
+-      listeners.push([name, listener])
+-    }
+-    const send = (event: unknown): void => {
+-      try {
+-        wv.send('desktop:event', event)
+-      } catch {
+-        /* Webview is navigating. */
+-      }
+-    }
+-    // Only local model events cross into WebUI; replay state when its listener is ready.
+-    const unsubscribe = window.electronAPI.onData((event) => {
+-      if (event.type === 'connections:openai' || event.type === 'models:refresh') send(event)
+-    })
+-    listen('did-start-loading', () => {
+-      webviewLoading = true
+-    })
+-    listen('dom-ready', () => {
+-      canRefresh = true
+-      webviewTitle = wv.getTitle()
+-    })
+-    listen('page-title-updated', (event: PageTitleUpdatedEvent) => {
+-      webviewTitle = event.title
+-    })
+-    listen('did-stop-loading', () => {
+-      webviewLoading = false
+-    })
+-    listen('did-fail-load', (event: DidFailLoadEvent) => {
+-      if (event.errorCode === -3 || event.isMainFrame === false) return
+-      canRefresh = true
+-      webviewError = {
+-        code: event.errorCode,
+-        description: event.errorDescription || $i18n.t('error.unknown'),
+-        url: event.validatedURL || ''
+-      }
+-    })
+-    listen('did-navigate', () => {
+-      webviewError = null
+-    })
+-    listen('render-process-gone', () => {
+-      webviewError = { code: -1, description: 'crashed', url: '' }
+-    })
+-    listen('console-message', (event: ConsoleMessageEvent) => {
+-      if (event.level >= 2) console.warn('[webview]', event.message)
+-    })
+-    listen('ipc-message', async (event: IpcMessageEvent) => {
+-      if (event.channel === 'webview:ready') {
+-        const runtimes = await Promise.all([
+-          window.electronAPI.getLlamaCppInfo(), window.electronAPI.getOllamaInfo()
+-        ])
+-        for (const [index, info] of runtimes.entries()) {
+-          if (!disposed && info?.reachable && info.url) {
+-            send({
+-              type: 'connections:openai',
+-              data: {
+-                action: 'add', url: `${info.url}/v1`,
+-                config: { provider: index === 0 ? 'llama.cpp' : 'ollama', connection_type: 'local' }
+-              }
+-            })
+-          }
+-        }
+-      } else if (event.channel === 'webview:send') {
+-        const request = event.args?.[0]
+-        if (!request) return
+-        let response: unknown
+-        try {
+-          response = await handleGuestRequest(window.electronAPI, request)
+-        } catch {
+-          response = { error: 'Desktop request rejected' }
+-        }
+-        if (!disposed && request._requestId) {
+-          try {
+-            wv.send('desktop:response', { _responseId: request._requestId, data: response })
+-          } catch {
+-            /* Webview is navigating. */
+-          }
+-        }
+-      } else if (event.channel === 'webview:event') {
+-        const payload = event.args?.[0]
+-        if (payload?.type !== 'theme:update') return
+-        const webuiTheme = typeof payload.data?.theme === 'string' ? payload.data.theme : 'system'
+-        const theme =
+-          webuiTheme === 'system' ? 'system' : webuiTheme.includes('dark') ? 'dark' : 'light'
+-        const resolved = ['dark', 'light'].includes(payload.data?.resolvedTheme)
+-          ? payload.data.resolvedTheme
+-          : theme === 'system'
+-            ? window.matchMedia('(prefers-color-scheme: dark)').matches
+-              ? 'dark'
+-              : 'light'
+-            : theme
+-        const background = payload.data?.background
+-        if (typeof background === 'string' && CSS.supports('color', background)) {
+-          webviewBackground = background
+-        }
+-        document.documentElement.classList.remove('light', 'dark')
+-        document.documentElement.classList.add(resolved)
+-        if ($config?.theme !== theme) {
+-          config.update((current) => ({ ...current, theme }))
+-          await window.electronAPI.setConfig({ theme })
+-        }
+-      }
+-    })
+-    return {
+-      destroy() {
+-        disposed = true
+-        unsubscribe()
+-        for (const [name, callback] of listeners) wv.removeEventListener(name, callback)
+-        webview = undefined
+-        webviewTitle = ''
+-        canRefresh = false
+-      }
+-    }
+-  }
++  let views: Record<string, ConnectionView> = {}
++  let refreshable: Record<string, boolean> = $state({})
++  $effect(() => { canRefresh = view === 'connected' && !!refreshable[activeConnectionId] })
++  export function refresh(): void { views[activeConnectionId]?.refresh() }
+ </script>
+ 
+-<div
+-  class="flex-1 flex flex-col min-h-0 min-w-0 overflow-clip bg-[#eee] dark:bg-[#111] relative content-webview-container"
+->
+-  {#if serverUrl && contentPreloadPath}
+-    <div
+-      class="webview-inset flex shrink-0 items-center justify-center bg-white dark:bg-[#171717]"
+-      style:height="var(--window-drag-height)"
+-      style:padding-inline="var(--window-title-padding)"
+-      style:background-color={webviewBackground}
+-    >
+-      <span class="truncate text-[11px] font-medium opacity-60" title={webviewTitle}>{webviewTitle}</span>
+-    </div>
+-    <webview
+-      src={serverUrl}
+-      class="flex-1 min-h-0 border-none"
+-      style="display: flex"
+-      partition="persist:connection-local"
+-      preload={contentPreloadPath}
+-      use:attachWebview
+-      allowpopups
+-    ></webview>
+-  {/if}
+-
+-  <!-- Error overlay when webview fails to load -->
+-  {#if activeWebviewError}
+-    <div
+-      class="absolute inset-0 z-20 flex items-center justify-center bg-[#eee] dark:bg-[#111]"
+-      transition:fade={{ duration: 200 }}
+-    >
+-      <div class="text-center max-w-sm px-6">
+-        <div
+-          class="mx-auto mb-4 w-10 h-10 rounded-full bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center"
+-        >
+-          {#if activeWebviewError.code === -1}
+-            <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full w-5 h-5 opacity-30">{@html WarningCircleIcon}</span>
+-          {:else}
+-            <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full w-5 h-5 opacity-30">{@html GlobeIcon}</span>
+-          {/if}
+-        </div>
+-        <div class="text-[14px] font-medium mb-1 opacity-80">
+-          {activeWebviewError.code === -1
+-            ? $i18n.t('setup.pageCrashed')
+-            : $i18n.t('setup.couldNotLoadPage')}
+-        </div>
+-        <div class="text-[12px] opacity-30 mb-1">{activeWebviewError.description}</div>
+-        {#if activeWebviewError.url}
+-          <div class="text-[11px] opacity-20 mb-6 break-all font-mono">
+-            {activeWebviewError.url}
+-          </div>
+-        {:else}
+-          <div class="mb-6"></div>
+-        {/if}
+-        <div class="flex gap-2 justify-center">
+-          <button
+-            class="px-4 py-2 rounded-xl text-[13px] font-medium bg-black dark:bg-white text-white dark:text-black border-none cursor-pointer transition hover:bg-gray-800 dark:hover:bg-gray-100 active:scale-[0.98]"
+-            onclick={refresh}
+-          >
+-            {$i18n.t('common.retry')}
+-          </button>
+-          <button
+-            class="px-4 py-2 rounded-xl text-[13px] bg-black/[0.04] dark:bg-white/[0.06] text-[#1d1d1f] dark:text-[#fafafa] border-none cursor-pointer opacity-60 hover:opacity-90 transition active:scale-[0.98]"
+-            onclick={openActiveInBrowser}
+-          >
+-            {$i18n.t('setup.openInBrowser')}
+-          </button>
+-        </div>
+-      </div>
++<div class="content-webview-container flex-1 flex min-h-0 min-w-0 relative">
++  {#each [...openConnections] as [connectionId, serverUrl] (connectionId)}
++    <div class="flex-1 min-h-0 min-w-0" style:display={view === 'connected' && activeConnectionId === connectionId ? 'flex' : 'none'}>
++      <ConnectionView bind:this={views[connectionId]} bind:canRefresh={() => refreshable[connectionId] ?? false, (value) => { refreshable[connectionId] = value }} {connectionId} {serverUrl} active={view === 'connected' && activeConnectionId === connectionId}
++        connecting={connectingId === connectionId} launchError={error}
++        {localInstalled} {installPhase} {installError} {installStatus} {toastVisible}
++        {onStartInstall} {onSetView} onOpenWebUI={() => onOpenWebUI(connectionId)} {onOpenTerminal} />
+     </div>
++  {/each}
++  {#if view !== 'connected'}
++    <ConnectionView serverUrl="" {connecting} launchError={error}
++      {localInstalled} {installPhase} {installError} {installStatus} {toastVisible}
++      {onStartInstall} {onSetView} onOpenWebUI={() => onOpenWebUI('local')} {onOpenTerminal} />
+   {/if}
+-
+-  <!-- Loading overlay for webview -->
+-  {#if isLoading}
+-    <div
+-      class="absolute inset-0 z-10 flex items-center justify-center bg-[#eee] dark:bg-[#111]"
+-      transition:fade={{ duration: 200 }}
+-    >
+-      <div class="flex w-full min-w-0 flex-col items-center gap-3 px-6">
+-        <div
+-          class="w-6 h-6 rounded-full border-2 border-black/10 dark:border-white/15 border-t-black/50 dark:border-t-white/50 animate-spin"
+-        ></div>
+-        <div class="flex w-full min-w-0 flex-col items-center gap-1.5" role="status">
+-          <span class="text-[12px] opacity-90">{$i18n.t('common.loading')}</span>
+-          {#if loadingStatus}
+-            <button
+-              type="button"
+-              class="max-w-[min(240px,100%)] truncate font-mono text-[11px] opacity-25 hover:opacity-40 focus-visible:opacity-40"
+-              title={loadingStatus}
+-              aria-label={$i18n.t('logs.expand')}
+-              onclick={onOpenTerminal}
+-              >{loadingStatus}</button
+-            >
+-          {/if}
+-        </div>
+-      </div>
+-    </div>
+-  {/if}
+-
+-  {#if !serverUrl}
+-    {#if insufficientStorage}
+-      <div class="px-5 py-2.5 flex items-center gap-3 bg-red-500/[0.06] border-b border-red-500/10">
+-        <div class="flex-1">
+-          <div class="text-[12px] text-red-400 font-medium">
+-            {$i18n.t('main.notEnoughDiskSpace')}
+-          </div>
+-          <div class="text-[11px] opacity-40 mt-0.5">
+-            {$i18n.t('main.diskSpaceRequired', { available: insufficientStorage })}
+-          </div>
+-        </div>
+-        <button
+-          class="shrink-0 text-[11px] px-3 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] opacity-60 hover:opacity-90 transition border-none text-[#1d1d1f] dark:text-[#fafafa] cursor-pointer"
+-          onclick={async () => {
+-            const MINIMUM_DISK_BYTES = 5 * 1024 * 1024 * 1024
+-            const disk = await window.electronAPI.getDiskSpace()
+-            if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
+-              const gb = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
+-              appState.set(`insufficient-storage:${gb}`)
+-              return
+-            }
+-            appState.set('initializing')
+-            window.electronAPI
+-              .installPython()
+-              .then(() => appState.set('ready'))
+-              .catch((e) => {
+-                appState.set(
+-                  `install-failed:${e?.message || $i18n.t('error.pythonInstallFailed')}`
+-                )
+-              })
+-          }}
+-        >
+-          {$i18n.t('common.retry')}
+-        </button>
+-      </div>
+-    {:else if installFailed}
+-      <div class="px-5 py-2.5 flex items-center gap-3 bg-red-500/[0.06] border-b border-red-500/10">
+-        <div class="flex-1">
+-          <div class="text-[12px] text-red-400 font-medium">
+-            {$i18n.t('error.installFailedGeneric')}
+-          </div>
+-          <div class="text-[11px] opacity-40 mt-0.5 line-clamp-2">
+-            {installFailed}
+-          </div>
+-        </div>
+-        <button
+-          class="shrink-0 text-[11px] px-3 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] opacity-60 hover:opacity-90 transition border-none text-[#1d1d1f] dark:text-[#fafafa] cursor-pointer"
+-          onclick={async () => {
+-            const MINIMUM_DISK_BYTES = 5 * 1024 * 1024 * 1024
+-            const disk = await window.electronAPI.getDiskSpace()
+-            if (disk?.free >= 0 && disk.free < MINIMUM_DISK_BYTES) {
+-              const gb = (disk.free / (1024 * 1024 * 1024)).toFixed(1)
+-              appState.set(`insufficient-storage:${gb}`)
+-              return
+-            }
+-            appState.set('initializing')
+-            window.electronAPI
+-              .installPython()
+-              .then(() => appState.set('ready'))
+-              .catch((e) => {
+-                appState.set(
+-                  `install-failed:${e?.message || $i18n.t('error.pythonInstallFailed')}`
+-                )
+-              })
+-          }}
+-        >
+-          {$i18n.t('common.retry')}
+-        </button>
+-      </div>
+-    {:else if isInitializing}
+-      <div class="px-5 py-1.5 text-[11px] opacity-25">
+-        {$i18n.t('setup.settingUp')}{#if $serverInfo?.status}
+-          {$i18n.t(`common.${$serverInfo.status === 'started' ? 'running' : $serverInfo.status}`)}
+-        {/if}
+-      </div>
+-    {/if}
+-
+-    <div class="flex-1 flex items-center justify-center px-6 relative overflow-hidden">
+-      {#if localInstalled}
+-        <div class="text-center max-w-[320px]" in:fade={{ duration: 200 }}>
+-          <div class="text-lg opacity-80 mb-1.5">{$i18n.t('app.name')}</div>
+-          <div class="text-[12px] opacity-30 mb-6">
+-            {$i18n.t('main.localReady')}
+-          </div>
+-          <button
+-            class="px-4 py-2 rounded-xl text-[13px] bg-black dark:bg-white text-white dark:text-black border-none disabled:opacity-40"
+-            onclick={onOpenWebUI}
+-            disabled={connecting || installPhase === 'working'}>{$i18n.t('main.openWebUI')}</button
+-          >
+-          {#if launchError}<div class="mt-3 text-[12px] opacity-60" role="alert">
+-              {launchError}
+-            </div>{/if}
+-          {#if installPhase === 'working' && installStatus}<div class="mt-3 text-[12px] opacity-40">
+-              {installStatus}
+-            </div>{/if}
+-        </div>
+-      {:else}
+-        <!-- Theme-responsive hero section -->
+-        <div class="absolute inset-0 bg-white dark:bg-black">
+-          <!-- Video background -->
+-          <video
+-            autoplay
+-            muted
+-            loop
+-            playsinline
+-            class="absolute inset-0 w-full h-full object-cover pointer-events-none"
+-          >
+-            <source src={landingVideo} type="video/mp4" />
+-          </video>
+-
+-          <!-- Gradient overlay -->
+-          <div
+-            class="absolute inset-0 bg-gradient-to-b from-white/10 via-white/90 via-75% to-white dark:from-black/10 dark:via-black/90 dark:to-black pointer-events-none"
+-          ></div>
+-
+-          <img
+-            src={logoImage}
+-            alt=""
+-            draggable="false"
+-            class="absolute left-[34px] top-[48px] w-[30px] h-[30px] dark:invert pointer-events-none"
+-          />
+-
+-          <!-- Content positioned bottom-left -->
+-          <div class="absolute bottom-0 left-0 right-0 px-[40px] py-[56px]" in:fade={{ duration: 300 }}>
+-            <div class="max-w-[440px]">
+-              <div
+-                class="text-3xl font-medium mb-3 tracking-tight text-black dark:text-white"
+-              >
+-                {$i18n.t('app.name')}
+-              </div>
+-              <div
+-                class="text-base opacity-60 mb-8 leading-relaxed text-black dark:text-white"
+-              >
+-                {$i18n.t('main.localDescription')}
+-              </div>
+-
+-              {#if !localInstalled}
+-                <button
+-                  class="group inline-flex items-center {installPhase === 'working' ? 'justify-start' : 'justify-between'} gap-2.5 w-[220px] max-w-full h-[36px] bg-black dark:bg-white px-4 rounded-none text-white dark:text-black text-[13px] border-none disabled:opacity-50"
+-                  onclick={() => {
+-                    if (installPhase === 'error') {
+-                      onStartInstall()
+-                    } else {
+-                      showGetStartedModal = true
+-                    }
+-                  }}
+-                  disabled={installPhase === 'working'}
+-                >
+-                  {#if installPhase === 'working'}
+-                    <div
+-                      class="w-3.5 h-3.5 rounded-full border-2 border-white/30 dark:border-black/30 border-t-white dark:border-t-black animate-spin"
+-                    ></div>
+-                    {$i18n.t('common.installing')}
+-                  {:else if installPhase === 'error'}
+-                    {$i18n.t('common.retry')}
+-                    <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full h-3.5 w-3.5">{@html RestartIcon}</span>
+-                  {:else}
+-                    {$i18n.t('main.getStarted')}
+-                    <span aria-hidden="true" class="inline-flex shrink-0 [&>svg]:size-full h-3.5 w-3.5 motion-safe:transition-transform duration-200 ease-out motion-safe:group-hover:translate-x-1">{@html ArrowRightIcon}</span>
+-                  {/if}
+-                </button>
+-
+-                {#if installPhase === 'working' && installStatus}
+-                  <div
+-                    class="mt-3 text-[12px] opacity-40 font-mono line-clamp-1"
+-                    in:fade={{ duration: 200 }}
+-                  >
+-                    {installStatus}
+-                  </div>
+-                {/if}
+-              {/if}
+-            </div>
+-          </div>
+-        </div>
+-      {/if}
+-
+-      <!-- Error toast -->
+-      {#if toastVisible && installError}
+-        <div
+-          class="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-500/90 backdrop-blur-sm text-white text-[12px] px-4 py-2 rounded-xl shadow-lg"
+-          in:fly={{ y: -10, duration: 200 }}
+-          out:fade={{ duration: 150 }}
+-        >
+-          {installError}
+-        </div>
+-      {/if}
+-    </div>
+-  {/if}
+-
+-  {#if showGetStartedModal}
+-    <GetStartedModal
+-      onContinue={(options) => {
+-        showGetStartedModal = false
+-        onStartInstall(options)
+-      }}
+-      onCancel={() => {
+-        showGetStartedModal = false
+-      }}
+-    />
++  {#if showAddConnectionModal}
++    <AddConnectionModal bind:url bind:connecting bind:error onConnect={onAddConnection}
++      onCancel={() => { showAddConnectionModal = false; error = '' }} />
+   {/if}
+ </div>
+diff --git a/src/renderer/src/lib/guest-protocol.ts b/src/renderer/src/lib/guest-protocol.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..88f08e8a5a5e53f63f47075a6de66738ddd79d99
+--- /dev/null
++++ b/src/renderer/src/lib/guest-protocol.ts
+@@ -0,0 +1,106 @@
++/**
++ * Desktop ↔ Open WebUI guest protocol.
++ *
++ * The <webview> guest (local or remote Open WebUI) is untrusted. It may only
++ * send these request types; the embedder must never index window.electronAPI
++ * with a guest-supplied string.
++ *
++ * Keep GUEST_SEND_TYPES in sync with src/preload/content-preload.ts.
++ */
++
++export const GUEST_SEND_TYPES = [
++  'token:update',
++  'app:info',
++  'app:data',
++  'window:isFocused'
++] as const
++
++export type GuestSendType = (typeof GUEST_SEND_TYPES)[number]
++
++export const GUEST_LOAD_PAGES = ['home', 'welcome', 'connected', 'settings'] as const
++
++export type GuestLoadPage = (typeof GUEST_LOAD_PAGES)[number]
++
++export const GUEST_THEME_EVENTS = ['theme:update'] as const
++
++const GUEST_PUSH_TYPES = ['query','call','theme:update','models:refresh','connections:terminal','connections:openai']
++
++export function isGuestPushType(type: unknown): boolean {
++  return typeof type === 'string' && GUEST_PUSH_TYPES.includes(type)
++}
++
++export function canRelayDesktopEvent(type: string, guestURL: string, localURL: string | undefined, targeted: boolean): boolean {
++  if (type === 'query' || type === 'call') return targeted
++  if (type === 'theme:update' || type === 'models:refresh') return true
++  if (type !== 'connections:terminal' && type !== 'connections:openai') return false
++  try {
++    const local = new URL(localURL ?? '')
++    return ['127.0.0.1','localhost','[::1]'].includes(local.hostname) &&
++      new URL(guestURL).origin === local.origin
++  } catch { return false }
++}
++
++export function isGuestSendType(type: unknown): type is GuestSendType {
++  return typeof type === 'string' && (GUEST_SEND_TYPES as readonly string[]).includes(type)
++}
++
++export function isGuestLoadPage(page: unknown): page is GuestLoadPage {
++  return typeof page === 'string' && (GUEST_LOAD_PAGES as readonly string[]).includes(page)
++}
++
++export function isGuestThemeEvent(type: unknown): boolean {
++  return typeof type === 'string' && (GUEST_THEME_EVENTS as readonly string[]).includes(type)
++}
++
++export type GuestSendRequest = {
++  type?: string
++  token?: unknown
++  _requestId?: string
++}
++
++/**
++ * Handle an allowlisted guest request. Unknown types return undefined and
++ * must not be forwarded to the privileged shell API.
++ */
++export async function handleGuestSend(
++  request: GuestSendRequest,
++  api: {
++    setAuthToken: (token: string) => Promise<unknown> | unknown
++    getAppInfo: () => Promise<{
++      version?: string
++      platform?: string
++      arch?: string
++      username?: string
++    }>
++    isWindowFocused: () => Promise<{ isFocused: boolean }>
++  }
++): Promise<unknown> {
++  if (!request || typeof request !== 'object' || !isGuestSendType(request.type)) {
++    return undefined
++  }
++
++  switch (request.type) {
++    case 'token:update':
++      if (typeof request.token === 'string' && request.token.length > 0 && request.token.length <= 16384) {
++        await api.setAuthToken(request.token)
++      }
++      return undefined
++    case 'app:info': {
++      const info = await api.getAppInfo()
++      // Do not relay OS username (or any other extra fields) to the guest.
++      return {
++        version: info?.version,
++        platform: info?.platform,
++        arch: info?.arch
++      }
++    }
++    case 'app:data':
++      // Open WebUI +layout.svelte does `if (data) appData.set(data)` but does
++      // not import the appData store (open-webui/desktop#26). A truthy value
++      // (`{}`) throws ReferenceError and the UI never mounts. `null` skips
++      // that branch. Never return config.json (API keys, envVars, paths).
++      return null
++    case 'window:isFocused':
++      return api.isWindowFocused()
++  }
++}

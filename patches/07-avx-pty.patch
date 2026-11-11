@@ -1,0 +1,201 @@
+diff --git a/.avx1/desktop-native-reference.json b/.avx1/desktop-native-reference.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..52c1a4313893121b5785151f8914a0542d2b74be
+--- /dev/null
++++ b/.avx1/desktop-native-reference.json
+@@ -0,0 +1,33 @@
++{
++  "schema": 1,
++  "repository": "aktalascloud/open-webui-desktop-ivybridge-avx1",
++  "source_commit": "73c563c5a85313ef1355a3021ab7bb9aedb5f48d",
++  "workflow_run": 41443363450,
++  "artifact_id": 13142415030,
++  "artifact_sha256": "9ecb9270b5d83c401f01a063570468383ec5c912e9a05c3e82b1701d21a475b5",
++  "artifact_bytes": 307213106,
++  "package_json_sha256": "9534af1cacb60c19a79fb64a13460c5d7028e2d175bef7e41fdabf3b2c49594c",
++  "package_lock_sha256": "e6e9cd082af1fa34c9998fac40631a006e588cd6ea879cf67a0740a1a84c388d",
++  "recipe_sha256": "899e33ccf279186683608d0325a129d4768184b9004c63601d9accb0e2292b18",
++  "compiler": "MSVC v143 14.44.35207, Windows SDK10.0.26100.0, Native64Bit",
++  "compile_flags": [
++    "/O2",
++    "/Ob3",
++    "/GL",
++    "/arch:AVX",
++    "/fp:precise"
++  ],
++  "link_flags": [
++    "/LTCG"
++  ],
++  "electron": "45.2.1",
++  "node_pty": "1.1.0",
++  "files": {
++    "conpty.node": "bca3ec002ffd66d68a105b5f64f043d8234291eb49953374b7b515b60762fc58",
++    "conpty_console_list.node": "f90f8b233872c800c6d71dab0ce8f3ec64eeab6eb664c585f4985f50738bc849",
++    "pty.node": "f6e4d440f86acef1e59069702d601e8957264df0adb91dd288fd2f420d2131d6",
++    "winpty-agent.exe": "692c507d978b10b6e78c8ea903a1e2c5d88600907547c3c7212972724b9e721c",
++    "winpty.dll": "c80ec9677dafd63191dc6698984ec3adf122d8de3ebfd75c2a3b39e590f59ed1"
++  },
++  "qualification": "NSIS digests and guest checks passed in reference CI; native PTY and installed app verified on Ivy Bridge before renderer-only repair"
++}
+diff --git a/.avx1/desktop_native.py b/.avx1/desktop_native.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..84f778d016007b59c15e39acc3b15b558a294ec7
+--- /dev/null
++++ b/.avx1/desktop_native.py
+@@ -0,0 +1,69 @@
++"""Reuse the exact qualified PTY binaries for renderer-only changes."""
++import hashlib
++import io
++import json
++import os
++from pathlib import Path
++import shutil
++import urllib.error
++import urllib.parse
++import urllib.request
++import zipfile
++from common import ROOT, WORK, sha256, write_json
++
++
++class NoRedirect(urllib.request.HTTPRedirectHandler):
++    def redirect_request(self,*args,**kwargs):return None
++
++
++def restore():
++    reference=json.loads((ROOT/'.avx1/desktop-native-reference.json').read_text('utf-8'))
++    canonical=lambda path:hashlib.sha256(path.read_text('utf-8').encode()).hexdigest()
++    if (canonical(ROOT/'package.json')!=reference['package_json_sha256'] or
++            canonical(ROOT/'package-lock.json')!=reference['package_lock_sha256']):
++        raise RuntimeError('Native ABI/dependency inputs changed; review a new native build')
++    names={'pty.node','conpty.node','conpty_console_list.node','winpty.dll','winpty-agent.exe'}
++    if set(reference['files'])!=names:raise RuntimeError('Unknown native reference inventory')
++    cache=ROOT/'.avx1-native-cache'
++    valid=lambda:all((cache/name).is_file() and not (cache/name).is_symlink()
++        and sha256(cache/name)==digest for name,digest in reference['files'].items())
++    if not valid():
++        token=os.environ.get('GITHUB_TOKEN')
++        if not token:raise RuntimeError('Qualified native cache missing; provide the reference artifact read token')
++        endpoint=f"https://api.github.com/repos/{reference['repository']}/actions/artifacts/{reference['artifact_id']}"
++        headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','User-Agent':'qualified-native-reuse'}
++        with urllib.request.urlopen(urllib.request.Request(endpoint,headers=headers),timeout=60) as response:artifact=json.load(response)
++        if (artifact['digest']!='sha256:'+reference['artifact_sha256'] or artifact['size_in_bytes']!=reference['artifact_bytes']
++                or artifact['workflow_run']['head_sha']!=reference['source_commit']):
++            raise RuntimeError('Qualified native artifact provenance differs')
++        try:
++            urllib.request.build_opener(NoRedirect()).open(urllib.request.Request(endpoint+'/zip',headers=headers),timeout=60)
++            raise RuntimeError('Native artifact download redirect missing')
++        except urllib.error.HTTPError as error:
++            if error.code!=302:raise
++            location=error.headers['Location']
++        parsed=urllib.parse.urlsplit(location)
++        if (parsed.scheme!='https' or parsed.username or parsed.password or not any((parsed.hostname or '').endswith(s)
++                for s in ('.blob.core.windows.net','.blob.storage.azure.net','.actions.githubusercontent.com','.githubusercontent.com'))):
++            raise RuntimeError('Unexpected native artifact storage host')
++        archive=WORK/'native-reference.zip'
++        # Never forward the GitHub token to artifact storage.
++        with urllib.request.build_opener(NoRedirect()).open(location,timeout=120) as response,archive.open('wb') as stream:shutil.copyfileobj(response,stream)
++        if sha256(archive)!=reference['artifact_sha256']:raise RuntimeError('Native artifact digest differs')
++        cache.mkdir(exist_ok=True)
++        with zipfile.ZipFile(archive) as outer:
++            nested=[name for name in outer.namelist() if name.endswith('.zip')]
++            if len(nested)!=1:raise RuntimeError('Native candidate archive inventory differs')
++            with zipfile.ZipFile(io.BytesIO(outer.read(nested[0]))) as candidate:
++                manifest=json.loads(candidate.read('manifest.json'))
++                if manifest['source_commit']!=reference['source_commit']:raise RuntimeError('Native candidate source differs')
++                prefix='desktop/resources/app.asar.unpacked/node_modules/node-pty/build/Release/'
++                for name,digest in reference['files'].items():
++                    data=candidate.read(prefix+name)
++                    if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('Native binary checksum differs')
++                    (cache/name).write_bytes(data)
++        if not valid():raise RuntimeError('Qualified native cache incomplete')
++    target=ROOT/'node_modules/node-pty/build/Release';target.mkdir(parents=True,exist_ok=True)
++    for name in names:shutil.copyfile(cache/name,target/name)
++    write_json(cache/'reference-complete.json',reference)
++    return {'status':'reused qualified source-built binaries; not recompiled','reference':reference}
+diff --git a/.avx1/test_desktop_native.py b/.avx1/test_desktop_native.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d0948177b1e623a8e1ef6f00bf80b1d008ec3bc
+--- /dev/null
++++ b/.avx1/test_desktop_native.py
+@@ -0,0 +1,41 @@
++import hashlib
++import json
++from pathlib import Path
++import tempfile
++import unittest
++from unittest.mock import patch
++import desktop_native
++
++
++class NativeReuseTests(unittest.TestCase):
++    def setUp(self):
++        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
++        self.root=Path(temporary.name);(self.root/'.avx1').mkdir();cache=self.root/'.avx1-native-cache';cache.mkdir()
++        digest=hashlib.sha256(b'{}\n').hexdigest()
++        for name in ['package.json','package-lock.json']:(self.root/name).write_bytes(b'{}\n')
++        files={}
++        for name in ['pty.node','conpty.node','conpty_console_list.node','winpty.dll','winpty-agent.exe']:
++            data=name.encode();(cache/name).write_bytes(data);files[name]=hashlib.sha256(data).hexdigest()
++        self.reference={'package_json_sha256':digest,'package_lock_sha256':digest,'files':files}
++        (self.root/'.avx1/desktop-native-reference.json').write_text(json.dumps(self.reference))
++        for setting in [patch.object(desktop_native,'ROOT',self.root),patch.object(desktop_native,'WORK',self.root/'work'),patch.dict(desktop_native.os.environ,{},clear=True)]:
++            setting.start();self.addCleanup(setting.stop)
++
++    def test_exact_qualified_cache_is_copied_without_running_a_compiler(self):
++        self.assertIn('not recompiled',desktop_native.restore()['status'])
++        self.assertEqual((self.root/'node_modules/node-pty/build/Release/pty.node').read_bytes(),b'pty.node')
++
++    def test_changed_lock_or_native_bytes_never_reuses_unknown_inputs(self):
++        (self.root/'package-lock.json').write_bytes(b'changed')
++        with self.assertRaisesRegex(RuntimeError,'inputs changed'):desktop_native.restore()
++        (self.root/'package-lock.json').write_bytes(b'{}\n')
++        (self.root/'.avx1-native-cache/pty.node').write_bytes(b'tampered')
++        with self.assertRaisesRegex(RuntimeError,'cache missing'):desktop_native.restore()
++
++    def test_unknown_native_file_inventory_is_rejected(self):
++        self.reference['files']['../escape.node']='a'*64
++        (self.root/'.avx1/desktop-native-reference.json').write_text(json.dumps(self.reference))
++        with self.assertRaisesRegex(RuntimeError,'inventory'):desktop_native.restore()
++
++
++if __name__=='__main__':unittest.main()
+diff --git a/.avx1/test_terminal.py b/.avx1/test_terminal.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ec126684bc9f321e9e9b492c742cdb32b933d4a
+--- /dev/null
++++ b/.avx1/test_terminal.py
+@@ -0,0 +1,34 @@
++"""Behavior tests for the fork's child-environment and MCP fixes."""
++import os
++import subprocess
++import sys
++import types
++import unittest
++from unittest.mock import patch
++
++
++class TerminalTests(unittest.TestCase):
++    def test_child_cannot_read_inherited_terminal_credentials(self):
++        from open_terminal.env import sanitized_environ
++        environment = {**os.environ, "OPEN_TERMINAL_API_KEY": "synthetic-secret",
++                       "open_terminal_private": "synthetic-secret", "KEEP_APPLICATION_SETTING": "kept"}
++        with patch.dict(os.environ, environment, clear=True):
++            child_env = sanitized_environ({"EXTRA_SETTING": "extra"})
++        result = subprocess.run([sys.executable, "-c", "import os; assert not any(k.upper().startswith('OPEN_TERMINAL_') for k in os.environ); assert os.environ['KEEP_APPLICATION_SETTING']=='kept'; assert os.environ['EXTRA_SETTING']=='extra'"],
++                                env=child_env, capture_output=True)
++        self.assertEqual(result.returncode, 0)
++
++    def test_stdio_passes_no_network_arguments(self):
++        from click.testing import CliRunner
++        from open_terminal.cli import main
++        received = []
++        fake = types.ModuleType("open_terminal.mcp_server")
++        fake.mcp = types.SimpleNamespace(run=lambda **kwargs: received.append(kwargs))
++        with patch.dict(sys.modules, {"open_terminal.mcp_server": fake}), patch("open_terminal.config.init", return_value={}):
++            result = CliRunner().invoke(main, ["mcp", "--transport", "stdio"])
++        self.assertEqual(result.exit_code, 0, repr(result.exception))
++        self.assertEqual(received, [{"transport": "stdio"}])
++
++
++if __name__ == "__main__":
++    unittest.main()

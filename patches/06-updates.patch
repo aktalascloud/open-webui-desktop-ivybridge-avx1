@@ -1,0 +1,120 @@
+diff --git a/.avx1/desktop-update-policy.test.mjs b/.avx1/desktop-update-policy.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..42f2ea4109b5646d16bebd0a644db6fcf0e8ad3c
+--- /dev/null
++++ b/.avx1/desktop-update-policy.test.mjs
+@@ -0,0 +1,71 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { readFileSync } from 'node:fs'
++import { stripTypeScriptTypes } from 'node:module'
++import ts from 'typescript'
++
++const main = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8')
++const tree = ts.createSourceFile('main.ts', main, ts.ScriptTarget.Latest, true)
++let uninstall
++function visit(node) {
++  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'ipcMain.handle' &&
++      node.arguments[0]?.text === 'package:uninstall') uninstall = node.arguments[1].getText(tree)
++  ts.forEachChild(node, visit)
++}
++visit(tree)
++assert.ok(uninstall)
++
++test('project-managed packages never reach direct pip uninstall; standalone ownership remains supported', async () => {
++  const calls = []
++  let managed = true
++  const runtime = { getConfig: async () => ({ localServer: { managedBackend: managed } }),
++    uninstallPackage: name => { calls.push(name); return true },
++    sendToRenderer() {}, isPackageInstalled: () => true, updateTray() {} }
++  const handler = new Function('runtime', `with (runtime) { return (${stripTypeScriptTypes(uninstall)}) }`)(runtime)
++  for (const name of ['open-webui', 'open-terminal']) await assert.rejects(handler({}, name), /Project-managed/)
++  assert.deepEqual(calls, [])
++  managed = false
++  assert.equal(await handler({}, 'open-terminal'), true)
++  assert.deepEqual(calls, ['open-terminal'])
++})
++
++const component = readFileSync(new URL('../src/renderer/src/lib/components/Main/Settings/OpenTerminal.svelte', import.meta.url), 'utf8')
++const script = component.slice(component.indexOf('>') + 1, component.indexOf('</script>'))
++const settings = ts.createSourceFile('settings.ts', script, ts.ScriptTarget.Latest, true)
++let update
++for (const node of settings.statements) {
++  if (ts.isVariableStatement(node)) {
++    const item = node.declarationList.declarations.find(declaration => declaration.name.getText(settings) === 'updatePackage')
++    if (item) update = item.initializer.getText(settings)
++  }
++}
++assert.ok(update)
++function fixture(installer) {
++  const runtime = { updating: false, operationError: '', otInfo: null, version: null,
++    window: { electronAPI: { updateOpenTerminal: installer, getPackageVersion: async () => 'new-version',
++      getOpenTerminalInfo: async () => ({ status: 'failed' }) } } }
++  Object.defineProperty(runtime, 'busy', { get: () => runtime.updating })
++  return { runtime, update: new Function('runtime', `with (runtime) { return (${stripTypeScriptTypes(update)}) }`)(runtime) }
++}
++
++test('actual settings update invokes the controller and ignores duplicate clicks while pending', async () => {
++  let finish, calls = 0
++  const f = fixture(() => { calls++; return new Promise(resolve => { finish = resolve }) })
++  const pending = f.update()
++  await f.update()
++  assert.equal(calls, 1)
++  finish({ status: 'started', external: true })
++  await pending
++  assert.equal(f.runtime.version, 'new-version')
++  assert.equal(f.runtime.updating, false)
++  assert.equal(f.runtime.operationError, '')
++})
++
++test('actual settings update displays failure and clears busy state instead of reporting success', async () => {
++  const f = fixture(async () => { throw Error('synthetic controller refusal') })
++  await f.update()
++  assert.equal(f.runtime.operationError, 'synthetic controller refusal')
++  assert.equal(f.runtime.updating, false)
++  assert.equal(f.runtime.version, null)
++  assert.equal(f.runtime.otInfo.status, 'failed')
++})
+diff --git a/.avx1/update/latest.yml b/.avx1/update/latest.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..54262fc338cc417598142166d75624923f35b249
+--- /dev/null
++++ b/.avx1/update/latest.yml
+@@ -0,0 +1,8 @@
++version: 0.1.5-avx1.20261104.23
++files:
++  - url: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261104-16b47dbc/Open-WebUI-AVX1-Setup.exe
++    sha512: SGX0bFS/j6opK3/UtcdRJH8CZbxH0SgEDW++81OPOwnzATudI1XwSKrwOnQFkxegw+riLTRFfv16Bqf6UE/LLw==
++    size: 132597339
++path: https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/download/daily-20261104-16b47dbc/Open-WebUI-AVX1-Setup.exe
++sha512: SGX0bFS/j6opK3/UtcdRJH8CZbxH0SgEDW++81OPOwnzATudI1XwSKrwOnQFkxegw+riLTRFfv16Bqf6UE/LLw==
++releaseDate: "2026-11-04T09:17:58.543833+00:00"
+diff --git a/dev-app-update.yml b/dev-app-update.yml
+index 5676e36ee613bcaeaa24d49e981663a0a0c316b1..87920d2ab660e140ebe9aaeb700e97ab39cce153 100644
+--- a/dev-app-update.yml
++++ b/dev-app-update.yml
+@@ -1,4 +1,4 @@
+-provider: github
+-owner: open-webui
+-repo: desktop
+-updaterCacheDirName: desktop-updater
++provider: github
++owner: open-webui
++repo: desktop
++updaterCacheDirName: desktop-updater
+diff --git a/src/main/updater.ts b/src/main/updater.ts
+index 2438252fa4ef59b8e69d35a2ef69317cf6058d33..1c6ee999c200e79575a3ee68c79f6de76676491b 100644
+--- a/src/main/updater.ts
++++ b/src/main/updater.ts
+@@ -40,6 +40,11 @@ function failed(error: unknown): void {
+ 
+ export function initUpdater(send: typeof publish, automatic: boolean): void {
+   publish = send
++  autoUpdater.setFeedURL({ provider: 'generic', url: 'https://raw.githubusercontent.com/aktalascloud/open-webui-desktop-ivybridge-avx1/avx1/.avx1/update/' })
++  autoUpdater.channel = 'latest'
++  autoUpdater.allowDowngrade = false
++  autoUpdater.allowPrerelease = true
++  autoUpdater.disableDifferentialDownload = true
+   autoUpdater.logger = log
+   autoUpdater.autoDownload = automatic
+   autoUpdater.autoInstallOnAppQuit = true

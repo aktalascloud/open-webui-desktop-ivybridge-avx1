@@ -1,0 +1,123 @@
+diff --git a/.avx1/PATCHES.json b/.avx1/PATCHES.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c2b60b0742b3256501b1cc05734c51f7b93fb43
+--- /dev/null
++++ b/.avx1/PATCHES.json
+@@ -0,0 +1,100 @@
++[
++  {
++    "id": "DESK-001",
++    "description": "Direct the desktop distribution feed to this fork; retain Open WebUI branding and profile identity.",
++    "source": "local"
++  },
++  {
++    "id": "DESK-002",
++    "description": "Rebuild node-pty with MSVC O2, GL, LTCG, AVX and precise floating point. Electron remains the upstream prebuilt engine.",
++    "source": "local recipe"
++  },
++  {
++    "id": "DESK-003",
++    "description": "Security-maintained Electron 45; modern Svelte type resolution; explicit managed backend reuse; no credential-bearing config/command logs; uv targets the selected Python.",
++    "source": "Official Electron/npm releases and generic owner-authored managed-backend integration."
++  },
++  {
++    "id": "DESK-004",
++    "description": "Fix renderer TypeScript contracts, remove undefined unused handlers, and clean up async MutationObserver ownership; type check now passes.",
++    "source": "Local source review and Svelte/TypeScript diagnostics."
++  },
++  {
++    "id": "DESK-005",
++    "description": "Build a normal NSIS EXE installer; update Desktop through one EXE feed and install verified optimized WebUI/Terminal forks with runtime staging and owner CODE guards.",
++    "source": "Fork distribution and guarded package provider."
++  },
++  {
++    "id": "DESK-006",
++    "description": "Add complete Russian UI, tray and native context menus, status/error messages; verify locale keys and actual installed onboarding.",
++    "source": "Reviewed Russian translation."
++  },
++  {
++    "id": "DESK-007",
++    "description": "Pin stable Electron45.1.0 and rebuild the native PTY for its headers; preserve independent optimized backend, Russian UI and existing profile.",
++    "source": "Official Electron runtime release; upstream prebuilt Chromium/Electron engines, local MSVC O2/AVX/GL/LTCG PTY build. No engine speedup percentage claimed."
++  },
++  {
++    "id": "DESK-008",
++    "description": "Security subset of official PR269: explicit guest-command allowlist, no privileged dynamic API dispatch or config/username relay; exact shipped preload, guest Node disabled and sandbox/context isolation forced. Certificate exceptions and guest clipboard/media permissions restricted to configured connections/loopback. Preserve current Electron45.1.0, native PTY and managed backend.",
++    "urls": [
++      "https://github.com/open-webui/desktop/pull/269"
++    ],
++    "source": "Reviewed immutable head8018ba3fe61fe869c2a40ded9dd84718d120f619; adapted relay and origin/TLS checks only. Embedded model/runtime/downloader changes are outside this port.",
++    "verification": "Node trust-boundary checks and real packaged Electron/NSIS gates; no new credentials or external services."
++  },
++  {
++    "id": "DESK-009",
++    "description": "PR269 event-delivery hardening: allowlist outbound guest events; Terminal bearer credentials and local inference endpoints reach only the owned local loopback webview. Recheck its origin when queued dom-ready delivery runs; never broadcast private status/error payloads to remote pages. User-targeted queries/calls and safe theme/model-refresh events retain their routing.",
++    "urls": [
++      "https://github.com/open-webui/desktop/pull/269"
++    ],
++    "source": "Own shared-relay adaptation after tracing every main-process event caller; actual sender function and redirect-race fixture."
++  },
++  {
++    "id": "DESK-010",
++    "description": "Backport upstream bounded UTF8 output buffer; retain Terminal and voice features removed by upstream0.1 redesign. Memory bound covers a single huge chunk; no new inference-speed claim.",
++    "urls": [
++      "https://github.com/open-webui/desktop/commit/877700e9969d51b1b06c42387cf9d5d94f5c9090"
++    ],
++    "verification": "Targeted regressions plus exact-source package/privacy/security/startup gates; final CI receipt records actual scope."
++  },
++  {
++    "id": "DESK-011",
++    "description": "Mainstream0.1.4 compatibility candidate: retain the complete upstream connection/launcher view per keyed saved connection, native voice/Terminal controls and strict guest relays. Preserve atomic fork installs and an external backend observed without child ownership. Restore real renderer typechecking via tsconfig.web.json. Separate native microphone session; reject iframe/redirect capture and post-navigation capability delivery.",
++    "upstream_commit": "38e54c7ba8266db1b14a9aaad6560f9cdf924005",
++    "verification": "17 selected source-level lifecycle/guest/permission/connection tests; Node typecheck and304-file renderer check0 errors16 warnings;329 Russian keys/placeholders. Candidate not yet packaged or installed; TerminalDock/startup/remaining contract review pending."
++  },
++  {
++    "id": "DESK-VOICE-ACCOUNT",
++    "description": "Remove the global voice token and scan-all-webviews fallback. Voice preflight reads only the exact selected guest owned by the trusted main frame and expected persistent partition. Each recording captures its target/account and gets one non-replayable STT submission; redirect responses are refused. Revalidate account/selection before upload and transcript delivery, and deliver only the server result. Session IDs prevent late microphone grants, HTTP results or close events from affecting a newer recording.",
++    "verification": "9 authority/session,5 actual IPC callback and2 synthetic MediaRecorder cases pass; no real media device, live account/token, STT inference or physical-phone probe. Package render/startup qualification remains pending."
++  },
++  {
++    "id": "DESK-TERMINAL-DOCK",
++    "description": "Bring upstream TerminalDock to all3 services while retaining saved connections/sidebar and keyed webview refresh. Replace raw Open Terminal PTY/log state with shared bounded run-scoped lifecycle/channel. Project-managed Terminal observes authenticated health only, never installs/spawns/mutates its key or owns termination while connecting. An explicit update delegates installation to the existing guarded project controller. Standalone starts share one child and reject an occupied configured port. Keys stay outside argv; active UI actions on external services reconnect instead of restarting processes.",
++    "verification": "10 synthetic owned/external/update/abort/key/output lifecycle cases and3 dock-action cases; real renderer check and package qualification tracked separately.",
++    "dependency": "External adapter requires Terminal fork /api/health. Qualify/install compatible Terminal before the new Desktop; do not use an unauthenticated/legacy fallback."
++  },
++  {
++    "id": "DESK-UPDATE-TRANSACTION",
++    "description": "Terminal Settings update/install now invokes the guarded updater instead of reconnecting. A reserved update transaction shares concurrent start/update requests; stop/shutdown waits for the atomic installer and suppresses reattachment. Project-managed packages cannot reach direct pip uninstall. Preserve the qualified external-backend ASAR identifier on its actual observed lifecycle path and restore original voice chime assets removed upstream.",
++    "verification": "3 new updater lifecycle cases,3 actual settings/uninstall policy cases and3 isolated maintenance controller policy cases; no live update executed. Private CODE suites remain waived while source fingerprints/core/state/owner gates stay enabled."
++  },
++  {
++    "id": "DESK-DEPENDENCIES-PACKAGE",
++    "description": "Refresh compatible lockfile versions after the official upstream baseline exposed runtime dependency advisories. Runtime npm audit now reports0 known findings; Electron45.2.1 and node-pty1.1.0 version/integrity remain unchanged during this refresh. Package only generated out/resources and normal production modules, excluding source/build caches/debug payloads; explicitly retain AGPL and Vazirmatn font notices.",
++    "verification": "Fresh production npm audit;50 affected-source cases plus2 actual electron-builder matcher/resource checks. This does not claim a complete Electron/Chromium CVE audit or packaged UI/startup proof."
++  },
++  {
++    "id": "DESK-HARDENED-PACKAGE-SMOKE",
++    "description": "Preserve upstream disabled Node inspector/options and ASAR integrity fuses. Test the unmodified installed EXE through loopback Chromium CDP first; inspect main-process guest preferences only in an unshipped sibling EXE with the single inspector fuse changed. Verify original EXE digest stays unchanged.",
++    "verification": "Two fuse/endpoint contract cases pass; actual packaged startup/guest verification remains mandatory in the corrected CI. Prior CI compiled and installed successfully but its old Electron-inspector harness timed out; no failed build was installed or published."
++  },
++  {
++    "id": "DESK-CONNECTION-BINDING",
++    "description": "Initialize new connection refresh bindings through a boolean getter instead of binding an undefined map entry to a bindable fallback. The previous runtime props_invalid_value exception prevented Desktop from opening WebUI and left the dock stale.",
++    "verification": "Reproduced against installed EXE in a credential-free isolated profile; corrected renderer mounted the actual WebUI guest. Real remote-connection, refresh and external Terminal reconnect regressions pass on the same Electron/IPC runtime. Packaged CI repeats these interactions.",
++    "native_scope": "Five PTY runtime binaries reused byte-for-byte from qualified source73c563c5/run41443363450; exact source/dependency/ABI/compiler/flag and binary fingerprints recorded, no native recompile."
++  }
++]
+diff --git a/.avx1/measurements/latest.json b/.avx1/measurements/latest.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec7d706c59b1e5ca4e80887250c21aaf1fe686da
+--- /dev/null
++++ b/.avx1/measurements/latest.json
+@@ -0,0 +1,11 @@
++{
++  "scope": "current selected checks; final package and deployment receipts are recorded after CI",
++  "inference_speedup_percent": null,
++  "model_required_for_build": false,
++  "memory_fixture": {
++    "input_utf8_bytes": 200000,
++    "retained_payload_limit_bytes": 1024,
++    "invalid_utf8_replacement": false,
++    "scope": "synthetic OutputBuffer test; not CPU/inference throughput"
++  }
++}
