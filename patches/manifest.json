@@ -4,8 +4,8 @@
   "ownership": "applied-downstream-only",
   "project": "desktop",
   "upstream": "f09e8015f7ffa237f4f1b99177abf42c11cc99bc",
-  "snapshot_source": "fe629d1ee2e3239b79fe9ecc8e7851dac474dee6",
-  "downstream_tree_without_patches": "df82e510842ed022edf5a976b132b1539b94a4cb",
+  "snapshot_source": "fb9b3462e81f6a75f225c6fe5750fe89ef8cfe3f",
+  "downstream_tree_without_patches": "7e4484dfdade37e5c218453d70491a450141a810",
   "groups": [
     {
       "patch": "01-connection-isolation.patch",
@@ -199,10 +199,9 @@
         ".github/pull_request_template.md",
         "CONTRIBUTOR_LICENSE_AGREEMENT",
         "LICENSE",
-        "README.md",
-        "README.ru.md"
+        "README.md"
       ],
-      "sha256": "6d899a02674e54ce83f92ced1a1bda79e83c94a84cdc7358fad199a9b6b9e6f8"
+      "sha256": "a24d3cca69ff4814618fc5db274605f66116313e83a76a3adb697ea80367f00d"
     },
     {
       "patch": "12-fork-records.patch",
@@ -225,10 +224,10 @@
     "08-electron-packaging.patch": "bb91f06e14725d57b7b11af82ab47975b353898240eb493db1143eafdefa7697",
     "09-portable-install.patch": "a5f4c34a7c7c47f8f56c4bebdee4b03422237c66a6b0445f57c1f5d3aceeb4c9",
     "10-ci-build.patch": "84857aa743c611e992e85543a1fccb320d85c09100431e06bf6dbf8ee72fd275",
-    "11-project-docs.patch": "6d899a02674e54ce83f92ced1a1bda79e83c94a84cdc7358fad199a9b6b9e6f8",
+    "11-project-docs.patch": "a24d3cca69ff4814618fc5db274605f66116313e83a76a3adb697ea80367f00d",
     "12-fork-records.patch": "9e1c83e3c9040ba81d4a9fe91a6cd8cdf1c06d562e7a4d6ec6380cf217da5d04",
     ".gitattributes": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da",
     "series": "9432fbe7c61ae1f40063a72f388a8fcd20020dc51d776e835652b3b6871cbaf3",
-    "README.md": "bab0b24b1ae78988d1de08728aedcc9616529216cfd22b6061dd77b52f48408f"
+    "README.md": "a8df458fe23dd1b0568e8f38d22cf3ff94e4abe5757939597f0fa69eed3eaec0"
   }
 }

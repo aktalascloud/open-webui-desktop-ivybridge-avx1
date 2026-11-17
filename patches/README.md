@@ -5,7 +5,7 @@ Only currently applied maintainer differences from the exact official baseline a
 Mainstream-only commits, rejected proposals and reverted experiments are excluded.
 Коммиты самого mainstream, неприменённые предложения и отменённые эксперименты исключены.
 
-Official baseline: `f09e8015f7ffa237f4f1b99177abf42c11cc99bc`. Downstream snapshot: `fe629d1ee2e3239b79fe9ecc8e7851dac474dee6`.
+Official baseline: `f09e8015f7ffa237f4f1b99177abf42c11cc99bc`. Downstream snapshot: `fb9b3462e81f6a75f225c6fe5750fe89ef8cfe3f`.
 Patches are already applied in this fork. Apply `series` only to a clean checkout of that exact baseline.
 В этом форке патчи уже применены. `series` предназначен только для чистого checkout указанной базы.
 Apply the numbered patches in the order listed in `series`. Each row describes one topic.
@@ -26,5 +26,5 @@ Independent managed WebUI/Terminal, isolated per-connection guests, account-boun
 | 8 | [08-electron-packaging.patch](08-electron-packaging.patch) | Set Electron dependencies, installer metadata, entitlements and packaged launch checks / Настраивает зависимости Electron, метаданные установщика, права и проверки запуска. | 19 |
 | 9 | [09-portable-install.patch](09-portable-install.patch) | Provide portable build commands and the fork installer / Добавляет команды переносимой сборки и установщик. | 4 |
 | 10 | [10-ci-build.patch](10-ci-build.patch) | Pin toolchains and package inputs, and run the fork build and publication checks / Закрепляет инструменты и входы сборки, запускает проверки пакетов и публикации. | 9 |
-| 11 | [11-project-docs.patch](11-project-docs.patch) | Document fork setup, support and license terms / Описывает установку, поддержку и условия лицензирования форка. | 5 |
+| 11 | [11-project-docs.patch](11-project-docs.patch) | Document fork setup, support and license terms / Описывает установку, поддержку и условия лицензирования форка. | 4 |
 | 12 | [12-fork-records.patch](12-fork-records.patch) | Record fork changes, upstream reviews and qualification measurements / Хранит журнал изменений, разбор upstream и результаты проверок. | 2 |
