@@ -1398,38 +1398,43 @@ index be3f7b28e564e7dd05eaf59d64adba1a4065ac0e..1468d07c88d6a48dae9360ed0094955b
 +For more information on this, and how to apply and follow the GNU AGPL, see
 +<https://www.gnu.org/licenses/>.
 diff --git a/README.md b/README.md
-index 1972384b48d4037e6f52a67d9d27ac006dd95a32..fa254a029cb10b224e263ab88edda08496e26817 100644
+index 1972384b48d4037e6f52a67d9d27ac006dd95a32..9781d83495da6862dc40d49611843d4bdfc74e1b 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,58 +1,9 @@
+@@ -1,58 +1,19 @@
 -# Open WebUI Desktop
-+# Open WebUI Desktop AVX1
++# Open WebUI Desktop for Ivy Bridge · AVX1
  
 -[![Version](https://img.shields.io/github/v/release/open-webui/desktop?label=version&color=%2331c48d)](https://github.com/open-webui/desktop/releases)
 -[![Downloads](https://img.shields.io/github/downloads/open-webui/desktop/total?color=%23764abc)](https://github.com/open-webui/desktop/releases)
 -[![Discord](https://img.shields.io/discord/1170866489302188073?label=discord&color=%235865F2)](https://discord.gg/open-webui)
 -[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-+[Upstream](https://github.com/open-webui/desktop) · [NSIS EXE](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/latest) · [Applied patches](patches/README.md)
++[Русский](#русский) · [Release / Скачать](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/releases/tag/daily-20261104-16b47dbc) · [Guide / Документация](patches/README.md) · [Evidence / Данные](https://github.com/aktalascloud/open-webui-desktop-ivybridge-avx1/blob/68d238235482f8d3afa2ca9ef7315dd090dbd27d/.avx1/measurements/latest.json) · [Upstream](https://github.com/open-webui/desktop)
  
 -![Open WebUI Desktop](./demo.png)
-+Build with Python 3.12+, Git and GitHub CLI: `Build.cmd status`, then `Build.cmd build`. CI and checks are in `.avx1/`. Keep user data, model weights and credentials outside the source checkout.
++A Windows desktop client for Open WebUI on Ivy Bridge. Connect to independent WebUI and Terminal services, with per-connection isolation, voice shortcuts and a localized interface.
  
 -[Open WebUI](https://github.com/open-webui/open-webui), up and running in a few clicks. Desktop installs it on your computer, keeps it up to date, and opens it whenever you need it.
-+Русский интерфейс, изоляция подключений, голосовые сочетания и проверенный AVX PTY. WebUI и Terminal запускаются отдельными сервисами.
++**Quick start.** Run the Windows setup EXE. For source builds, use `Build.cmd status` and `Build.cmd build` with Python 3.12+, Git and GitHub CLI. [Applied patches](patches/README.md).
  
 -## Download
--
++**Evidence.** The synthetic OutputBuffer check kept 1,024 bytes out of a 200,000-byte UTF-8 fixture without invalid replacement characters. The Windows release also documents its qualified AVX PTY binary and reconnect checks.
+ 
 -- **macOS:** [Apple Silicon](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64.dmg) · [Intel](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64.dmg)
 -- **Windows:** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui-x64-setup.exe) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui-arm64-setup.exe)
 -- **Linux (Debian / Ubuntu / Mint):** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui_amd64.deb) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.deb)
 -- **Linux (AppImage):** [Intel / AMD (x64)](https://github.com/open-webui/desktop/releases/latest/download/open-webui_x86_64.AppImage) · [ARM64](https://github.com/open-webui/desktop/releases/latest/download/open-webui_arm64.AppImage)
--
++## Русский
+ 
 -If an AppImage fails to start with a `chrome-sandbox` error on Debian, Ubuntu, or Linux Mint, install the `.deb` package above. Its installer configures the sandbox permissions needed to start the app.
--
++Настольный Windows-клиент Open WebUI для Ivy Bridge. Подключается к отдельным сервисам WebUI и Terminal. Есть изоляция подключений, голосовые сочетания и русский интерфейс.
+ 
 -Snap and Flatpak packages are available on the [releases page](https://github.com/open-webui/desktop/releases).
--
++**Запуск.** Запустите установщик Windows. Для сборки из исходников выполните `Build.cmd status` и `Build.cmd build` с Python 3.12+, Git и GitHub CLI. [Патчи](patches/README.md).
+ 
 -Internet is required for installation and updates.
--
++**Проверка.** В синтетической проверке OutputBuffer из входных 200 000 байт UTF-8 сохранилось 1 024 байта без невалидных символов замены. В выпуске описаны проверенная AVX-сборка PTY и тесты повторного подключения.
+ 
 -Enable **Automatic desktop updates** in **Settings → About** to update on quit.
 -
 -## How It Works
@@ -1464,4 +1469,4 @@ index 1972384b48d4037e6f52a67d9d27ac006dd95a32..fa254a029cb10b224e263ab88edda084
 -```
 -
 -See [CHANGELOG.md](CHANGELOG.md) for release history. Licensed under [AGPL-3.0](LICENSE).
-+[Checks and measurements](.avx1/measurements/latest.json)
++[All projects / Все проекты](https://github.com/aktalascloud)
